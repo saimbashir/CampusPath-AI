@@ -1,0 +1,355 @@
+/* CampusPath AI · expressive motion layer.
+   Everything here is decorative and sits on top of style.css. It only runs when the
+   visitor has not asked for reduced motion, and it can be deleted without affecting layout. */
+
+@keyframes rise { from { opacity: 0; transform: translate3d(0, 14px, 0); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-down { from { opacity: 0; transform: translate3d(0, -10px, 0); } to { opacity: 1; transform: none; } }
+@keyframes slide-in { from { opacity: 0; transform: translate3d(-12px, 0, 0); } to { opacity: 1; transform: none; } }
+@keyframes grow-x { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes grow-y { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes bar-rise { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes float { 0%, 100% { transform: translate3d(0, 0, 0); } 50% { transform: translate3d(0, -10px, 0); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+@keyframes ring { 0% { transform: scale(.82); opacity: .6; } 100% { transform: scale(1.7); opacity: 0; } }
+@keyframes gradient-shift { to { background-position: 250% center; } }
+@keyframes pop { 0% { transform: scale(.97); } 55% { transform: scale(1.015); } 100% { transform: scale(1); } }
+@keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-6px); } 40% { transform: translateX(5px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(2px); } }
+@keyframes dialog-in { from { opacity: 0; transform: translate3d(0, 14px, 0) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes toast-in { from { opacity: 0; transform: translate3d(28px, 0, 0) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes draw-line { from { stroke-dashoffset: 1000; } to { stroke-dashoffset: 0; } }
+@keyframes aurora {
+  from { transform: translate3d(-2%, 0, 0) scale(1); }
+  to { transform: translate3d(3%, -2%, 0) scale(1.06); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+
+  /* Page entrances: every render of a screen replays a calm, staggered reveal. */
+  .content > .page-heading { animation: fade-down .55s var(--ease) backwards; }
+  .content .card,
+  .content .next-card,
+  .content .empty,
+  .content .quiz-card,
+  .content .alert,
+  .content .error-state,
+  .content .stats .stat { animation: rise .6s var(--ease) backwards; }
+  .content .card + .card { animation-delay: .08s; }
+  .content .stats .stat:nth-child(2) { animation-delay: .06s; }
+  .content .stats .stat:nth-child(3) { animation-delay: .12s; }
+  .content .stats .stat:nth-child(4) { animation-delay: .18s; }
+  .content .list-item { animation: rise .5s var(--ease) backwards; }
+  .content .list-item:nth-child(2) { animation-delay: .04s; }
+  .content .list-item:nth-child(3) { animation-delay: .08s; }
+  .content .list-item:nth-child(4) { animation-delay: .12s; }
+  .content .list-item:nth-child(5) { animation-delay: .16s; }
+  .content .list-item:nth-child(6) { animation-delay: .2s; }
+  .content .alert.error { animation: rise .5s var(--ease) backwards, shake .5s .3s var(--ease); }
+
+  /* Sidebar: navigation items arrive one by one. */
+  .nav > button { animation: slide-in .5s var(--ease) backwards; }
+  .nav > button:nth-child(2) { animation-delay: .03s; }
+  .nav > button:nth-child(3) { animation-delay: .06s; }
+  .nav > button:nth-child(4) { animation-delay: .09s; }
+  .nav > button:nth-child(5) { animation-delay: .12s; }
+  .nav > button:nth-child(6) { animation-delay: .15s; }
+  .nav > button:nth-child(7) { animation-delay: .18s; }
+  .nav > button:nth-child(8) { animation-delay: .21s; }
+  .nav > button:nth-child(9) { animation-delay: .24s; }
+  .nav button.active::before { transform-origin: center; animation: grow-y .45s var(--ease) backwards; }
+  .topbar { animation: fade-down .5s var(--ease) backwards; }
+  .nav-more[open] { animation: fade .3s ease; }
+
+  /* Data visuals draw themselves in. */
+  .progress span,
+  .viva-progress span { transform-origin: left center; animation: grow-x 1.1s var(--ease) backwards; }
+  .chart-bar { transform-origin: bottom center; animation: bar-rise 1s var(--ease) backwards; }
+  .chart-item:nth-child(2) .chart-bar { animation-delay: .05s; }
+  .chart-item:nth-child(3) .chart-bar { animation-delay: .1s; }
+  .chart-item:nth-child(4) .chart-bar { animation-delay: .15s; }
+  .chart-item:nth-child(5) .chart-bar { animation-delay: .2s; }
+  .chart-item:nth-child(6) .chart-bar { animation-delay: .25s; }
+  .chart-item:nth-child(7) .chart-bar { animation-delay: .3s; }
+  .chart-item:nth-child(8) .chart-bar { animation-delay: .35s; }
+  .graph g[data-topic] { animation: fade .6s ease backwards; }
+  .graph g[data-topic]:nth-of-type(2) { animation-delay: .05s; }
+  .graph g[data-topic]:nth-of-type(3) { animation-delay: .1s; }
+  .graph g[data-topic]:nth-of-type(4) { animation-delay: .15s; }
+  .graph g[data-topic]:nth-of-type(5) { animation-delay: .2s; }
+  .graph g[data-topic]:nth-of-type(6) { animation-delay: .25s; }
+  .graph g[data-topic]:nth-of-type(7) { animation-delay: .3s; }
+  .graph g[data-topic]:nth-of-type(8) { animation-delay: .35s; }
+  .graph line { stroke-dasharray: 1000; animation: draw-line 1.1s var(--ease) backwards; }
+
+  /* Buttons: a light sheen on hover for primary actions. */
+  button::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 35%, rgb(255 255 255 / .28) 50%, transparent 65%);
+    transform: translateX(-120%);
+  }
+  button:hover:not(:disabled)::after { transform: translateX(120%); transition: transform .8s var(--ease); }
+  button.secondary::after, button.ghost::after, .nav button::after { display: none; }
+  .stat { transition: transform .3s var(--ease), box-shadow .3s var(--ease); }
+  @media (hover: hover) {
+    .stat:hover { transform: translateY(-3px); box-shadow: var(--shadow-2); }
+    .feature { transition: transform .3s var(--ease), border-color .3s var(--ease), box-shadow .3s var(--ease); }
+    .feature:hover { transform: translateY(-4px); border-color: var(--accent-line); box-shadow: var(--shadow-2); }
+    .quiz-option:hover:not(:disabled) { transform: translateX(4px); }
+    .brand:hover .brand-mark { transform: rotate(-8deg) scale(1.06); }
+  }
+
+  /* Quiz feedback: correct answers pop, wrong answers shake gently. */
+  .quiz-option.answer-correct { animation: pop .55s var(--ease); }
+  .quiz-option.answer-wrong { animation: shake .48s var(--ease); }
+
+  /* Voice: a listening orb breathes and sends out rings. */
+  .voice-orb.listening { animation: breathe 2.4s ease-in-out infinite; }
+  .voice-orb.listening::before,
+  .voice-orb.listening::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    pointer-events: none;
+    animation: ring 1.9s var(--ease) infinite;
+  }
+  .voice-orb.listening::after { animation-delay: .95s; }
+
+  /* Overlays: dialogs scale in, toasts slide in, the backdrop fades. */
+  dialog[open] { animation: dialog-in .36s var(--ease) both; }
+  dialog::backdrop { animation: fade .3s ease both; }
+  #toast { animation: toast-in .45s var(--ease) both; }
+
+  /* Landing and sign-in: a slow aurora behind a gradient headline and a floating orb. */
+  body:has(.public-header)::before {
+    content: "";
+    position: fixed;
+    inset: -20%;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(40% 40% at 20% 20%, rgb(249 115 22 / .16), transparent 70%),
+      radial-gradient(35% 35% at 85% 12%, rgb(250 204 21 / .10), transparent 70%),
+      radial-gradient(45% 45% at 62% 96%, rgb(251 146 60 / .12), transparent 70%);
+    animation: aurora 22s ease-in-out infinite alternate;
+  }
+  .public-header { animation: fade-down .6s var(--ease) backwards; }
+  .hero .pill { animation: rise .6s var(--ease) backwards; }
+  .hero h1 { animation: rise .8s .08s var(--ease) backwards; }
+  .hero p { animation: rise .8s .18s var(--ease) backwards; }
+  .hero .actions { animation: rise .8s .26s var(--ease) backwards; }
+  .hero-visual { animation: rise 1s .2s var(--ease) backwards; }
+  .hero h1 span {
+    background: linear-gradient(100deg, var(--accent) 0%, #f59e0b 32%, #facc15 52%, var(--accent) 78%);
+    background-size: 250% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: gradient-shift 7s linear infinite;
+  }
+  .hero .orb { animation: float 6s ease-in-out infinite; }
+  .orbit::before { animation: spin 42s linear infinite reverse; }
+  .orbit::after { animation: spin 24s linear infinite; }
+  .features .feature { animation: rise .7s var(--ease) backwards; }
+  .features .feature:nth-child(2) { animation-delay: .1s; }
+  .features .feature:nth-child(3) { animation-delay: .2s; }
+  .auth-card { animation: rise .7s var(--ease) backwards; }
+  .auth-aside > * { animation: rise .7s var(--ease) backwards; }
+  .auth-aside > :nth-child(2) { animation-delay: .08s; }
+  .auth-aside > :nth-child(3) { animation-delay: .16s; }
+  .auth-points li { animation: rise .6s var(--ease) backwards; }
+  .auth-points li:nth-child(2) { animation-delay: .1s; }
+  .auth-points li:nth-child(3) { animation-delay: .2s; }
+
+  /* Course home: the recommended-next card gets a slow sheen sweep. */
+  .next-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 40%, rgb(255 255 255 / .09) 50%, transparent 60%);
+    transform: translateX(-100%);
+    animation: sweep 6s ease-in-out 1.2s infinite;
+  }
+  @keyframes sweep { 0% { transform: translateX(-100%); } 40%, 100% { transform: translateX(100%); } }
+}
+
+/* ==========================================================================
+   v0.7.1 · 3D transition layer
+   Screens assemble in depth: headings swing down, cards stand up, stats flip in,
+   lists unfold, dialogs and toasts turn into view. Cards and stats tilt towards
+   the pointer, primary buttons press like real keys, and content further down
+   the page rises in 3D as it scrolls into view. Angles shrink on smaller screens
+   and everything stays calm for visitors who prefer reduced motion.
+   ========================================================================== */
+:root { --t3d-ang: 12deg; --t3d-depth: 90px; --t3d-lift: 28px; --t3d-persp: 1200px; }
+@media (max-width: 900px) { :root { --t3d-ang: 9deg; --t3d-depth: 60px; --t3d-lift: 20px; --t3d-persp: 1000px; } }
+@media (max-width: 640px) { :root { --t3d-ang: 6deg; --t3d-depth: 36px; --t3d-lift: 14px; --t3d-persp: 800px; } }
+
+@keyframes cp3d-rise {
+  from { opacity: 0; transform-origin: 50% 100%; transform: perspective(var(--t3d-persp)) translate3d(0, var(--t3d-lift), calc(var(--t3d-depth) * -1)) rotateX(var(--t3d-ang)); }
+  to { opacity: 1; transform-origin: 50% 100%; transform: perspective(var(--t3d-persp)) translate3d(0, 0, 0) rotateX(0); }
+}
+@keyframes cp3d-head {
+  from { opacity: 0; transform-origin: 50% 0; transform: perspective(var(--t3d-persp)) translate3d(0, calc(var(--t3d-lift) * -.5), 0) rotateX(calc(var(--t3d-ang) * -1.8)); }
+  to { opacity: 1; transform-origin: 50% 0; transform: perspective(var(--t3d-persp)) translate3d(0, 0, 0) rotateX(0); }
+}
+@keyframes cp3d-flip {
+  from { opacity: 0; transform-origin: 0 50%; transform: perspective(900px) translate3d(0, 0, calc(var(--t3d-depth) * -.6)) rotateY(calc(var(--t3d-ang) * -3)); }
+  to { opacity: 1; transform-origin: 0 50%; transform: perspective(900px) translate3d(0, 0, 0) rotateY(0); }
+}
+@keyframes cp3d-fold {
+  from { opacity: 0; transform-origin: 50% 0; transform: perspective(900px) rotateX(calc(var(--t3d-ang) * -5)); }
+  to { opacity: 1; transform-origin: 50% 0; transform: perspective(900px) rotateX(0); }
+}
+@keyframes cp3d-door {
+  from { opacity: 0; transform-origin: 0 50%; transform: perspective(700px) rotateY(calc(var(--t3d-ang) * 5.5)); }
+  to { opacity: 1; transform-origin: 0 50%; transform: perspective(700px) rotateY(0); }
+}
+@keyframes cp3d-swing {
+  from { opacity: 0; transform-origin: 0 50%; transform: perspective(var(--t3d-persp)) translate3d(0, 0, calc(var(--t3d-depth) * -1)) rotateY(calc(var(--t3d-ang) * -1.4)) rotateX(calc(var(--t3d-ang) * .5)); }
+  to { opacity: 1; transform-origin: 0 50%; transform: perspective(var(--t3d-persp)) translate3d(0, 0, 0) rotateY(0) rotateX(0); }
+}
+@keyframes cp3d-turn {
+  from { opacity: 0; transform-origin: 50% 50%; transform: perspective(var(--t3d-persp)) translate3d(0, var(--t3d-lift), calc(var(--t3d-depth) * -1.2)) rotateX(calc(var(--t3d-ang) * 2)); }
+  60% { opacity: 1; }
+  to { opacity: 1; transform-origin: 50% 50%; transform: perspective(var(--t3d-persp)) translate3d(0, 0, 0) rotateX(0); }
+}
+@keyframes cp3d-dialog {
+  from { opacity: 0; transform-origin: 50% 0; transform: perspective(1200px) translate3d(0, -24px, -40px) rotateX(calc(var(--t3d-ang) * -1.3)) scale(.97); }
+  to { opacity: 1; transform-origin: 50% 0; transform: perspective(1200px) translate3d(0, 0, 0) rotateX(0) scale(1); }
+}
+@keyframes cp3d-toast {
+  from { opacity: 0; transform-origin: 100% 50%; transform: perspective(900px) translate3d(36px, 0, 0) rotateY(calc(var(--t3d-ang) * -4)); }
+  to { opacity: 1; transform-origin: 100% 50%; transform: perspective(900px) translate3d(0, 0, 0) rotateY(0); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Screen entrances (staggered delays from the rules above are kept). */
+  .content > .page-heading { animation: cp3d-head .7s var(--ease) backwards; }
+  .content .card,
+  .content .empty,
+  .content .alert,
+  .content .error-state { animation: cp3d-rise .75s var(--ease) backwards; }
+  .content .next-card { animation: cp3d-swing .85s .05s var(--ease) backwards; }
+  .content .quiz-card { animation: cp3d-turn .8s var(--ease) backwards; }
+  .content .stats .stat { animation: cp3d-flip .75s var(--ease) backwards; }
+  .content .list-item { animation: cp3d-fold .6s var(--ease) backwards; }
+  .content .quiz-option { animation: cp3d-fold .5s var(--ease) backwards; }
+  .content .quiz-option:nth-of-type(2) { animation-delay: .06s; }
+  .content .quiz-option:nth-of-type(3) { animation-delay: .12s; }
+  .content .quiz-option:nth-of-type(4) { animation-delay: .18s; }
+  .content .quiz-option.answer-correct { animation: pop .55s var(--ease); }
+  .content .quiz-option.answer-wrong { animation: shake .48s var(--ease); }
+  .nav > button { animation: cp3d-door .6s var(--ease) backwards; }
+  .features .feature, .auth-card { animation: cp3d-rise .85s var(--ease) backwards; }
+  dialog[open] { animation: cp3d-dialog .45s var(--ease) both; }
+  #toast { animation: cp3d-toast .5s var(--ease) both; }
+
+  /* Scroll reveal: content below the fold waits, then rises in 3D (set by motion.js). */
+  .content .cp3d-wait, .features .cp3d-wait { opacity: 0; animation: none !important; }
+  .content .cp3d-in, .features .cp3d-in { animation: cp3d-rise .8s var(--ease) both !important; }
+  .content .list-item.cp3d-in { animation-name: cp3d-fold !important; animation-duration: .6s !important; }
+  .content .stat.cp3d-in { animation-name: cp3d-flip !important; }
+
+  /* Pointer tilt (motion.js sets --t3x / --t3y on fine pointers only). */
+  .content .card, .content .next-card, .features .feature {
+    transition: transform .55s var(--ease), border-color .25s var(--ease), box-shadow .35s var(--ease);
+  }
+  .content .stat { transition: transform .55s var(--ease), box-shadow .35s var(--ease); }
+  .cp3d-tilt {
+    transform: perspective(1100px) rotateX(var(--t3y, 0deg)) rotateY(var(--t3x, 0deg)) translate3d(0, -3px, 0) !important;
+    transition: transform .14s ease-out, border-color .25s var(--ease), box-shadow .35s var(--ease) !important;
+    will-change: transform;
+  }
+  .stat.cp3d-tilt, .feature.cp3d-tilt { box-shadow: calc(var(--t3x-n, 0) * -14px) calc(18px + var(--t3y-n, 0) * 8px) 38px -18px rgb(124 45 18 / .42); }
+  .card.cp3d-tilt, .next-card.cp3d-tilt { box-shadow: calc(var(--t3x-n, 0) * -10px) 22px 44px -26px rgb(124 45 18 / .4); }
+  .stat.cp3d-tilt .icon { transform: translateZ(0) scale(1.12); transition: transform .3s var(--ease); }
+
+  /* Primary actions press like real keys. */
+  :is(.content, .auth-card, .hero, dialog) button:not(.secondary):not(.ghost):not(.danger):not(.quiz-option):not(:disabled) {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / .3), 0 3px 0 color-mix(in srgb, var(--accent) 62%, #3b1405), 0 10px 18px -10px rgb(124 45 18 / .55);
+  }
+  :is(.content, .auth-card, .hero, dialog) button:not(.secondary):not(.ghost):not(.danger):not(.quiz-option):hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / .3), 0 5px 0 color-mix(in srgb, var(--accent) 62%, #3b1405), 0 16px 24px -12px rgb(124 45 18 / .6);
+  }
+  :is(.content, .auth-card, .hero, dialog) button:not(.secondary):not(.ghost):not(.danger):not(.quiz-option):active:not(:disabled) {
+    transform: translateY(2px);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / .2), 0 1px 0 color-mix(in srgb, var(--accent) 62%, #3b1405), 0 4px 8px -6px rgb(124 45 18 / .5);
+    transition-duration: .06s;
+  }
+  :is(.content, dialog) button.secondary:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 16px -12px rgb(124 45 18 / .45); }
+  :is(.content, dialog) button.secondary:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+
+  /* Sidebar: the active item lifts forward slightly. */
+  .nav > button { transition: transform .3s var(--ease), background-color .2s var(--ease), color .2s var(--ease); }
+  @media (hover: hover) { .nav > button:hover { transform: perspective(600px) translateZ(14px) translateX(2px); } }
+  .nav > button.active { transform: perspective(600px) translateZ(10px); }
+}
+@media print { .cp3d-wait { opacity: 1 !important; } .cp3d-tilt { transform: none !important; } }
+
+/* ==========================================================================
+   v0.8.0 · 3D page transitions (driven by motion.js → CampusTransition)
+   Leave = the old screen turns away in 3D; enter = the new one turns in.
+   Angles are smaller on phones; nothing runs for reduced-motion visitors.
+   ========================================================================== */
+:root { --pt-k: 1; }
+@media (max-width: 900px) { :root { --pt-k: .75; } }
+@media (max-width: 640px) { :root { --pt-k: .55; } }
+.workarea { perspective: 1600px; perspective-origin: 50% 20%; overflow-x: clip; }
+#main.pt-leave, #main.pt-enter { will-change: transform, opacity; backface-visibility: hidden; transform-style: preserve-3d; }
+#main.pt-leave { animation-duration: .3s; animation-timing-function: cubic-bezier(.55, 0, .9, .4); animation-fill-mode: both; pointer-events: none; }
+#main.pt-enter { animation-duration: .62s; animation-timing-function: cubic-bezier(.16, .84, .24, 1); animation-fill-mode: both; }
+#main.pt-back { --pt-s: -1; }
+#main { --pt-s: 1; }
+
+#main.pt-leave.pt-cube { animation-name: pt-cube-out; transform-origin: 50% 50% -40vw; }
+#main.pt-enter.pt-cube { animation-name: pt-cube-in; transform-origin: 50% 50% -40vw; }
+@keyframes pt-cube-out { to { opacity: 0; transform: rotateY(calc(-70deg * var(--pt-k) * var(--pt-s))); } }
+@keyframes pt-cube-in { from { opacity: 0; transform: rotateY(calc(70deg * var(--pt-k) * var(--pt-s))); } }
+
+#main.pt-leave.pt-flip { animation-name: pt-flip-out; transform-origin: 50% 0; }
+#main.pt-enter.pt-flip { animation-name: pt-flip-in; transform-origin: 50% 0; }
+@keyframes pt-flip-out { to { opacity: 0; transform: rotateX(calc(55deg * var(--pt-k))) translateZ(-120px); } }
+@keyframes pt-flip-in { from { opacity: 0; transform: rotateX(calc(-60deg * var(--pt-k))) translateZ(-160px); } }
+
+#main.pt-leave.pt-door { animation-name: pt-door-out; transform-origin: 0 50%; }
+#main.pt-enter.pt-door { animation-name: pt-door-in; transform-origin: 100% 50%; }
+@keyframes pt-door-out { to { opacity: 0; transform: rotateY(calc(75deg * var(--pt-k) * var(--pt-s))); } }
+@keyframes pt-door-in { from { opacity: 0; transform: rotateY(calc(-75deg * var(--pt-k) * var(--pt-s))); } }
+
+#main.pt-leave.pt-zoom { animation-name: pt-zoom-out; transform-origin: 50% 30%; }
+#main.pt-enter.pt-zoom { animation-name: pt-zoom-in; transform-origin: 50% 30%; }
+@keyframes pt-zoom-out { to { opacity: 0; transform: translateZ(calc(260px * var(--pt-k))); filter: blur(4px); } }
+@keyframes pt-zoom-in { from { opacity: 0; transform: translateZ(calc(-520px * var(--pt-k))) rotateX(calc(8deg * var(--pt-k))); } }
+
+#main.pt-leave.pt-fold { animation-name: pt-fold-out; transform-origin: 50% 100%; }
+#main.pt-enter.pt-fold { animation-name: pt-fold-in; transform-origin: 50% 0; }
+@keyframes pt-fold-out { to { opacity: 0; transform: rotateX(calc(-70deg * var(--pt-k))); } }
+@keyframes pt-fold-in { from { opacity: 0; transform: rotateX(calc(70deg * var(--pt-k))) translateY(-20px); } }
+
+#main.pt-leave.pt-swing { animation-name: pt-swing-out; transform-origin: 50% -30%; }
+#main.pt-enter.pt-swing { animation-name: pt-swing-in; transform-origin: 50% -30%; }
+@keyframes pt-swing-out { to { opacity: 0; transform: rotateZ(calc(-5deg * var(--pt-k) * var(--pt-s))) rotateY(calc(35deg * var(--pt-k) * var(--pt-s))) translateZ(-140px); } }
+@keyframes pt-swing-in { from { opacity: 0; transform: rotateZ(calc(5deg * var(--pt-k) * var(--pt-s))) rotateY(calc(-35deg * var(--pt-k) * var(--pt-s))) translateZ(-140px); } }
+
+@media (prefers-reduced-motion: reduce) { #main.pt-leave, #main.pt-enter { animation: none !important; } }
+
+/* ==========================================================================
+   v0.9.2 · Lighter effects for low-power devices (html.cp-lite, set by motion.js).
+   Same layout, colours and transitions; drops the costly extras: full-screen blurs and
+   decorations that repaint on every frame.
+   ========================================================================== */
+.cp-lite .topbar { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--surface); }
+.cp-lite dialog::backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; }
+.cp-lite body::before, .cp-lite .next-card::after, .cp-lite .orbit::before, .cp-lite .orbit::after { animation: none !important; }
+.cp-lite .hero h1 span { animation: none !important; background-position: 0 center; }
+.cp-lite #main.pt-leave.pt-zoom { animation-name: pt-zoom-out-lite; }
+@keyframes pt-zoom-out-lite { to { opacity: 0; transform: translateZ(calc(260px * var(--pt-k))); } }

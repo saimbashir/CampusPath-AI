@@ -1,0 +1,25 @@
+# Render Blueprint: free web service. The database is external (Neon free PostgreSQL),
+# because Render's free disk is wiped on every restart and its free database expires.
+services:
+  - type: web
+    name: campuspath-ai
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # paste your Neon connection string in the Render dashboard
+      - key: DEMO_MODE
+        value: "false"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: LLM_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta/openai
+      - key: LLM_API_KEY
+        sync: false          # your free Gemini key from aistudio.google.com
+      - key: LLM_MODEL
+        sync: false          # e.g. a current Gemini Flash model name shown in AI Studio
+      - key: MAX_UPLOAD_MIB
+        value: "16"
+      - key: BACKGROUND_UPLOAD_MIB
+        value: "1.5"
