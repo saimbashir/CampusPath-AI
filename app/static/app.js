@@ -39,9 +39,30 @@ function empty(title,desc,button=''){return `<div class="empty"><h2>${title}</h2
 function bar(value){return `<div class="progress"><span class="${value<60?'low':''}" style="width:${Math.min(100,Math.max(0,Number(value)))}%"></span></div>`;}
 function topicsCard(topics){return `<section class="card"><div class="row"><h2>Concept mastery</h2><span class="tag">MODEL ESTIMATE</span></div>${topics.map(t=>`<div class="topic-row"><div class="row"><button data-topic="${t.id}">${e(t.name)}</button><strong>${t.mastery}%</strong></div>${bar(t.mastery)}<small>${t.attempts} observed attempts · ${Math.round(t.confidence*100)}% evidence confidence</small></div>`).join('')}</section>`;}
 function chart(values){const list=Object.entries(values);return list.length?`<div class="chart" role="img" aria-label="${e(list.map(([k,v])=>`${k}: ${v}%`).join(', '))}">${list.map(([k,v])=>`<div class="chart-item"><div class="chart-bar" style="height:${Number(v)}%"><small>${v}%</small></div><label title="${e(k)}">${e(k)}</label></div>`).join('')}</div>`:empty('No assessment evidence','Results appear after assessed activity.');}
+function studentEnrollmentPage(page){
+ const pages={
+  path:['Learning path','Your personalized sequence will appear after joining a course.'],
+  tutor:['Course tutor','Join a course to ask questions grounded in your learning materials.'],
+  quiz:['Practice quiz','Join a course to practice its concepts and take quizzes.'],
+  graph:['Knowledge map','Your course concepts and prerequisite connections will appear here.'],
+  voice:['Practice viva','Join a course to start personalized oral practice.'],
+  'formal-viva':['Assigned viva','No assigned vivas yet. Join a course to see assessments published by your teacher.'],
+  materials:['Materials','Join a course to access its materials and manage course-linked private uploads.'],
+  assignments:['Assignments','No assignments yet. Join a course to see work assigned by your teacher.'],
+  planner:['Study & revision','Join a course to build a study and revision plan from your learning progress.'],
+  analytics:['My results','No assessment results yet. Join a course and complete learning activities to see your results.']
+ };
+ const join='<button data-nav="courses">Join a course '+icon('arrow')+'</button>';
+ if(page==='dashboard'){
+  $('#main').innerHTML=heading('Welcome to CampusPath AI.','Your learning workspace is ready. Join your first course to get started.')+`<div class="stats">${stat('Enrolled courses',0,'No courses yet','book')}${stat('Overall mastery','—','No assessment evidence')}${stat('Exam readiness','—','No assessment evidence','shield')}${stat('Quiz accuracy','—','No assessment evidence','quiz')}</div><div class="next-card"><div><span class="eyebrow">GET STARTED</span><h2>Join your first course</h2><p>Ask your teacher for an enrollment code to unlock course materials, quizzes, viva and personalized progress.</p><div class="actions subhead">${join}<button class="secondary" data-nav="lab">Explore Algorithm Lab</button></div></div><div class="orb" aria-hidden="true">${icon('book')}</div></div><div class="grid equal"><section class="card"><h2>Make this space yours</h2><p>Update your learning preferences and profile.</p><button class="secondary" data-nav="settings">Open settings</button></section><section class="card"><h2>Your learning inbox</h2><p>Check notices intended for your account.</p><button class="secondary" data-nav="notifications">Open notifications</button></section></div>`;
+  return;
+ }
+ const [title,description]=pages[page]||['Learning workspace','Join a course to unlock this course-connected tool.'];
+ $('#main').innerHTML=heading(title,description)+`<section class="card">${empty('No active course',description,join)}</section>`;
+}
 async function navigate(page){stopVoice();clearInterval(state.quizTimer);clearInterval(state.oralTimer);state.page=page;$('.sidebar')?.classList.remove('open');$('.menu-toggle')?.setAttribute('aria-expanded','false');document.querySelectorAll('[data-nav]').forEach(b=>{b.classList.toggle('active',b.dataset.nav===page);b.setAttribute('aria-current',b.dataset.nav===page?'page':'false');});const ticket=state.navTicket=(state.navTicket||0)+1;try{await window.CampusTransition?.leave(page);}catch{}if(ticket!==state.navTicket)return;$('#main').innerHTML='<div class="loading" role="status" aria-label="Loading page"></div>';
- try{if(!state.cid&&!['courses','settings','notifications'].includes(page)&&state.user.role!=='admin'){page='courses';state.page=page;}
- const renderers={'formal-viva':formalVivaPage,'oral-review':oralReviewPage,'viva-analytics':vivaAnalytics,structure:structureStudio,notifications:notificationPage,'viva-review':vivaReviewPage,research:researchPage,dashboard, courses:coursePage,path:pathPage,tutor:tutorPage,quiz:quizPage,graph:graphPage,voice:voicePage,materials:materialsPage,assignments:assignmentsPage,planner:plannerPage,lab:labPage,analytics:analyticsPage,students:studentsPage,topics:topicsPage,questions:questionsPage,copilot:copilotPage,settings:settingsPage};await renderers[page]();}
+ try{if(!state.cid&&state.user.role==='teacher'&&!['courses','settings','notifications'].includes(page)){page='courses';state.page=page;}
+ const renderers={'formal-viva':formalVivaPage,'oral-review':oralReviewPage,'viva-analytics':vivaAnalytics,structure:structureStudio,notifications:notificationPage,'viva-review':vivaReviewPage,research:researchPage,dashboard, courses:coursePage,path:pathPage,tutor:tutorPage,quiz:quizPage,graph:graphPage,voice:voicePage,materials:materialsPage,assignments:assignmentsPage,planner:plannerPage,lab:labPage,analytics:analyticsPage,students:studentsPage,topics:topicsPage,questions:questionsPage,copilot:copilotPage,settings:settingsPage};if(!state.cid&&state.user.role==='student'&&!['courses','settings','notifications','lab'].includes(page)){studentEnrollmentPage(page);}else{await renderers[page]();}}
  catch(err){$('#main').innerHTML=heading('Unable to load this page')+`<div class="error-state" role="alert">${e(err.message)}<div class="actions"><button data-action="retry">Try again</button></div></div>`;}
  if(ticket===state.navTicket)window.CampusTransition?.enter(state.page);
 }
