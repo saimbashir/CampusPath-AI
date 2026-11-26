@@ -12,10 +12,13 @@ from app.config import COOKIE_SECURE, SESSION_HOURS
 router=APIRouter(prefix='/api/auth')
 def public(user):
     return dict(id=user.id,name=user.name,email=user.email,university_id=user.university_id,role=user.role,profile=user.profile)
+def teacher_self_registration_enabled():
+    return os.getenv('ALLOW_SELF_REGISTER_TEACHERS', 'false').strip().lower() == 'true'
+
 @router.post('/register',status_code=201)
 def register(data:Register,request:Request,db=Depends(get_db)):
     throttle(db,'register:'+request.client.host,20)
-    if data.role=='teacher':
+    if data.role=='teacher' and (data.teacher_key or not teacher_self_registration_enabled()):
         result=db.execute(update(TeacherKey).where(TeacherKey.digest==digest(data.teacher_key),TeacherKey.revoked.is_(False),TeacherKey.expires>now(),TeacherKey.uses<TeacherKey.limit).values(uses=TeacherKey.uses+1))
         if result.rowcount!=1:
             db.rollback()

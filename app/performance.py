@@ -85,7 +85,7 @@ PUBLIC_ROUTES = {
     '/login': ('Sign in · CampusPath AI',
                'Sign in to CampusPath AI to continue your course-connected learning path, practice and viva preparation.'),
     '/register': ('Create your account · CampusPath AI',
-                  'Create a CampusPath AI student account with your course enrollment code, or register with a faculty invitation.'),
+                  'Create a CampusPath AI student or teacher account. Students join courses using enrollment codes.'),
 }
 PRIVATE_ROBOTS = 'noindex, nofollow'
 

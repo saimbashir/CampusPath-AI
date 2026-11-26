@@ -364,7 +364,7 @@
     });
     document.querySelectorAll('.auth-aside:not([data-cp])').forEach(function (aside) {
       aside.dataset.cp = '1';
-      mount(aside, { chars: [one('kiwi', 'wave', 'key', [o('cube', 'blue'), o('star', 'gold')]), one('pip', 'point', 'bulb', [o('orb', 'pink'), o('ring', 'blue')])], lines: ['Welcome to CampusPath 👋', "Students: join with your teacher's code 🔑", 'Teachers: use your faculty invitation ✉️'] }, 'aside');
+      mount(aside, { chars: [one('kiwi', 'wave', 'key', [o('cube', 'blue'), o('star', 'gold')]), one('pip', 'point', 'bulb', [o('orb', 'pink'), o('ring', 'blue')])], lines: ['Welcome to CampusPath 👋', "Students: join with your teacher's code 🔑", 'Teachers: create courses and share enrollment codes 🔑'] }, 'aside');
     });
     document.querySelectorAll('.auth-card:not([data-cp])').forEach(function (card) {
       card.dataset.cp = '1';

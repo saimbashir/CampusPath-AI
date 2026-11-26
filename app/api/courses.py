@@ -58,8 +58,10 @@ def edit_topic(cid:int,tid:int,data:TopicInput,user=Depends(current_user),db=Dep
 @router.get('/courses/{cid}/resources')
 def resources(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid)
-    rows=db.scalars(select(Resource).where(Resource.course_id==cid,or_(Resource.owner_id.is_(None),Resource.owner_id==user.id))).all()
-    return [{'id':r.id,'filename':r.filename,'kind':r.kind,'created':r.created,'status':r.status or 'ready','status_detail':r.status_detail,'download_available':db.get(ResourceBlob,r.id) is not None} for r in rows]
+    # Check blob existence without fetching large binary files into server memory.
+    available=select(ResourceBlob.resource_id).where(ResourceBlob.resource_id==Resource.id).exists()
+    rows=db.execute(select(Resource,available).where(Resource.course_id==cid,or_(Resource.owner_id.is_(None),Resource.owner_id==user.id)).order_by(Resource.created.desc(),Resource.id.desc())).all()
+    return [{'id':r.id,'filename':r.filename,'kind':r.kind,'created':r.created,'status':r.status or 'ready','status_detail':r.status_detail,'download_available':bool(has_blob)} for r,has_blob in rows]
 @router.post('/courses/{cid}/resources',status_code=201)
 def upload(cid:int,file:UploadFile=File(...),user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid)

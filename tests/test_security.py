@@ -29,12 +29,15 @@ def test_teacher_course_boundaries(clients):
 
 def registration(**overrides):
     return dict(name='New Person',email='new@example.com',university_id='NEW-1',password='Long-Safe-Pass!2026',confirm_password='Long-Safe-Pass!2026',**overrides)
+
 @pytest.mark.parametrize('key',['wrong-key','revoked-key-for-testing','expired-key-for-testing',''])
-def test_teacher_invites_fail_closed(setup,key):
+def test_teacher_invites_fail_closed(setup,key,monkeypatch):
+    monkeypatch.setenv('ALLOW_SELF_REGISTER_TEACHERS', 'false')
     c=TestClient(app)
     assert c.post('/api/auth/register',json=registration(role='teacher',teacher_key=key)).status_code==403
 
-def test_single_use_invite_and_no_privilege_escalation(setup):
+def test_single_use_invite_and_no_privilege_escalation(setup,monkeypatch):
+    monkeypatch.setenv('ALLOW_SELF_REGISTER_TEACHERS', 'false')
     c=TestClient(app)
     assert c.post('/api/auth/register',json=registration(role='admin')).status_code==422
     body=registration(role='teacher',teacher_key='valid-key-for-testing')
@@ -42,11 +45,38 @@ def test_single_use_invite_and_no_privilege_escalation(setup):
     body.update(email='another@example.com',university_id='NEW-2')
     assert c.post('/api/auth/register',json=body).status_code==403
 
-def test_duplicate_registration_does_not_burn_invite(setup):
+def test_duplicate_registration_does_not_burn_invite(setup,monkeypatch):
+    monkeypatch.setenv('ALLOW_SELF_REGISTER_TEACHERS', 'false')
     c=TestClient(app);data=registration(role='teacher',teacher_key='valid-key-for-testing');data['email']='saim@campuspath.demo'
     assert c.post('/api/auth/register',json=data).status_code==409
     data['email']='new@example.com'
     assert c.post('/api/auth/register',json=data).status_code==201
+
+def test_optional_teacher_self_registration_and_course_isolation(setup, monkeypatch):
+    monkeypatch.setenv('ALLOW_SELF_REGISTER_TEACHERS', 'true')
+    c=TestClient(app)
+    assert c.get('/api/health').json()['teacher_self_registration'] is True
+    assert c.post('/api/auth/register',json=registration(role='admin')).status_code==422
+    created=c.post('/api/auth/register',json=registration(role='teacher'))
+    assert created.status_code==201,created.text
+    assert created.json()['role']=='teacher'
+    logged=c.post('/api/auth/login',json={'email':'new@example.com','password':'Long-Safe-Pass!2026'})
+    assert logged.status_code==200,logged.text
+    c.headers['X-CSRF-Token']=logged.json()['csrf']
+    assert c.get('/api/courses').json()==[]
+    assert c.get('/api/admin/overview').status_code==403
+    assert c.get('/api/courses/1/students').status_code==404
+    new_course=c.post('/api/courses',json={'name':'New Test Course','code':'TEST-NEW','section':'A'})
+    assert new_course.status_code==201,new_course.text
+    course=new_course.json()
+    s=TestClient(app)
+    assert s.post('/api/auth/register',json={**registration(role='student'),'email':'learner@example.com','university_id':'NEW-2'}).status_code==201
+    login=s.post('/api/auth/login',json={'email':'learner@example.com','password':'Long-Safe-Pass!2026'})
+    assert login.status_code==200
+    s.headers['X-CSRF-Token']=login.json()['csrf']
+    assert s.post('/api/courses/join',json={'code':course['enrollment_code']}).status_code==200
+    assert s.get('/api/courses').json()[0]['id']==course['id']
+    assert c.get(f"/api/courses/{course['id']}/students").status_code==200
 
 def test_csrf_origin_and_logout(clients):
     c,_=clients('saim@campuspath.demo');token=c.headers.pop('X-CSRF-Token')

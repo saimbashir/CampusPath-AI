@@ -61,7 +61,7 @@ async def conflict(request,exc):
 @app.get('/api/health')
 def health():
     import os
-    return {'max_upload_mib':MAX_UPLOAD//(1024*1024),'stt_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('STT_MODEL')),'tts_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('TTS_MODEL')),'status':'ok','demo_mode':DEMO_MODE,'version':'0.7.0','voice':'PCM WebSocket with energy VAD, per-turn STT and controlled playback'
+    return {'max_upload_mib':MAX_UPLOAD//(1024*1024),'stt_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('STT_MODEL')),'tts_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('TTS_MODEL')),'status':'ok','demo_mode':DEMO_MODE,'teacher_self_registration':auth.teacher_self_registration_enabled(),'version':'0.7.0','voice':'PCM WebSocket with energy VAD, per-turn STT and controlled playback'
         ,'voice_transport':'websocket-pcm-vad','retrieval':'Lexical index with optional Qdrant hybrid search'}
 SHELL=ROOT/'templates'/'index.html'
 def shell_response(request:Request,private:bool=False):
