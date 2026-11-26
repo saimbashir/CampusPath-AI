@@ -40,19 +40,31 @@ def student_access(db,user,course_id,student_id):
     if not db.scalar(select(Enrollment.id).where(Enrollment.course_id==course_id,Enrollment.student_id==student_id)):
         raise HTTPException(404,'Student not enrolled in this course.')
     if user.role=='teacher': audit(db,user,'student record viewed',f'{course_id}:{student_id}')
-def throttle(db,key,limit=8):
+def throttle(db, key, limit=8):
     from sqlalchemy import case
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
     from sqlalchemy.dialects.postgresql import insert as postgres_insert
-    key=digest(key);current=now();deadline=current+timedelta(minutes=15)
-    insert=sqlite_insert if db.bind.dialect.name=='sqlite' else postgres_insert
-    statement=insert(LoginThrottle).values(key=key,count=1,until=deadline)
-    statement=statement.on_conflict_do_update(index_elements=[LoginThrottle.key],set_={
-        'count':case((LoginThrottle.until<=current,1),else_=LoginThrottle.count+1),
-        'until':case((LoginThrottle.until<=current,deadline),else_=LoginThrottle.until)
-    },where=(LoginThrottle.until<=current)|(LoginThrottle.count<limit))
-    result=db.execute(statement);db.commit()
-    if result.rowcount!=1:raise HTTPException(429,'Too many attempts. Try again in 15 minutes.')
+
+    key = digest(key)
+    current = now()
+    deadline = current + timedelta(minutes=15)
+    insert = sqlite_insert if db.bind.dialect.name == 'sqlite' else postgres_insert
+
+    statement = insert(LoginThrottle).values(key=key, count=1, until=deadline)
+    statement = statement.on_conflict_do_update(
+        index_elements=[LoginThrottle.key],
+        set_={
+            'count': case((LoginThrottle.until <= current, 1), else_=LoginThrottle.count + 1),
+            'until': case((LoginThrottle.until <= current, deadline), else_=LoginThrottle.until)
+        },
+        where=(LoginThrottle.until <= current) | (LoginThrottle.count < limit)
+    ).returning(LoginThrottle.count)
+
+    # RETURNING works for both SQLite and PostgreSQL and avoids unreliable INSERT rowcount.
+    accepted = db.execute(statement).scalar_one_or_none()
+    db.commit()
+    if accepted is None:
+        raise HTTPException(429, 'Too many attempts. Try again in 15 minutes.')
 
 def teacher_courses(user):
     return select(Course.id).where((Course.teacher_id==user.id)|Course.id.in_(select(TeacherAssignment.course_id).where(TeacherAssignment.teacher_id==user.id)))
