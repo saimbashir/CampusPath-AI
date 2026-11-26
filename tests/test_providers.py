@@ -46,16 +46,33 @@ def test_image_ocr_actual_tool():
     assert 'remaining cost' in parts[0][1]
     assert 'OCR' in parts[0][0]
 
-def test_validated_generation_stays_unpublished(clients,monkeypatch):
-    t,_=clients('teacher@campuspath.demo')
-    monkeypatch.setattr('app.api.generation.DEMO_MODE',False)
-    from app.models import Chunk
-    with SessionLocal() as db:source_id=db.scalar(select(Chunk.id))
-    async def fake(*args):return QuestionDraft.model_validate({'question':{'topic_id':7,'prompt':'A new source-grounded test question?','options':['One','Two'],'correct':0,'explanation':'A reviewed explanation.'},'source_ids':[source_id]})
-    monkeypatch.setattr('app.api.generation.structured_generation',fake)
-    result=t.post('/api/courses/1/questions/generate',json={'topic_id':7})
-    assert result.status_code==200 and result.json()['review_required']
-    with SessionLocal() as db:assert not db.scalar(select(Question.id).where(Question.prompt=='A new source-grounded test question?'))
+def test_validated_generation_stays_unpublished(clients, monkeypatch):
+    t, _ = clients('teacher@campuspath.demo')
+    monkeypatch.setattr('app.api.generation.DEMO_MODE', False)
+
+    async def fake(prompt, context, schema):
+        return QuestionDraft.model_validate({
+            'question': {
+                'topic_id': 7,
+                'prompt': 'A new source-grounded test question?',
+                'options': ['One', 'Two'],
+                'correct': 0,
+                'explanation': 'A reviewed explanation.'
+            },
+            'source_ids': [context[0]['id']]
+        })
+
+    monkeypatch.setattr('app.api.generation.structured_generation', fake)
+    result = t.post('/api/courses/1/questions/generate', json={'topic_id': 7})
+
+    assert result.status_code == 200, result.text
+    assert result.json()['review_required']
+
+    with SessionLocal() as db:
+        assert not db.scalar(select(Question.id).where(
+            Question.prompt == 'A new source-grounded test question?'
+        ))
+
 
 def test_generated_foreign_citation_rejected(clients,monkeypatch):
     t,_=clients('teacher@campuspath.demo');monkeypatch.setattr('app.api.generation.DEMO_MODE',False)
