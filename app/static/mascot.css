@@ -152,3 +152,10 @@ html[data-theme="dark"] .auth-aside .cp-say { color: var(--ink); }
 .dept-chip:hover { transform: translateY(-3px) rotate(-1deg); box-shadow: var(--shadow-2); }
 @keyframes cp-dept-bob { 0%, 100% { transform: translateY(0) rotateY(-20deg); } 50% { transform: translateY(-3px) rotateY(20deg); } }
 @media (max-width: 640px) { .departments { margin-top: 0; padding-bottom: 56px; } .dept-chip { font-size: .82rem; padding: 8px 12px; } }
+
+/* Performance: existing WebPs already contain looping, detailed character motion.
+   Use an immediate small placeholder only until that animation is available. */
+.cp-char:not([data-cp-ready="1"])::before { content: attr(data-emoji); position: absolute; inset: 0; display: grid; place-items: center; font-size: calc(var(--s) * .65); pointer-events: none; }
+.cp-hidden .cp-say, .cp-hidden .cp-caret, .cp-hidden .cp-fallback, .cp-hidden .cp-confetti i { animation-play-state: paused !important; }
+/* Avoid adding another bob to an already animated WebP; fallback emoji still bobs. */
+@media (prefers-reduced-motion: reduce) { .cp-say, .cp-caret, .cp-fallback { animation: none !important; } }

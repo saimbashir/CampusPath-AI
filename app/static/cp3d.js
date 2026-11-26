@@ -411,7 +411,7 @@ void main(){
      page as ImageBitmaps (no read-back), at most one GPU frame is in flight (WebGL2 fences),
      and quality/frame rate adapt to measured GPU latency. */
   const MODE = (function () {
-    try { const m = (new URLSearchParams(location.search).get('cp3d') || localStorage.getItem('cp3d') || '').toLowerCase(); if (m === 'reset') localStorage.removeItem('cp3d-guard'); return m; } catch (e) { return ''; }
+    try { const m = (new URLSearchParams(location.search).get('cp3d') || '').toLowerCase(); if (m === 'reset') localStorage.removeItem('cp3d-guard'); return m; } catch (e) { return ''; }
   })(); // 'off' = always emoji, 'force' = render even on a software GPU (testing only)
   const SOFTWARE = /swiftshader|llvmpipe|softpipe|software|basic render|lavapipe|mesa offscreen/i;
   let gl = null, gl2 = false, glCanvas = null, prog = null, vsh = null, fsh = null, loc = {}, parallel = null;
@@ -441,17 +441,21 @@ void main(){
   function probe() {
     if (probed) return !!gl;
     probed = true;
+    // Normal browsing uses the baked animated WebPs. Do not probe or initialize WebGL,
+    // and do not emit a GPU-failure event merely because live rendering is not requested.
+    if(MODE!=='live'&&MODE!=='force'&&MODE!=='guardtest'){stats.reason='Using pre-rendered animated WebP characters';return false;}
+    if(MODE==='live'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches)return false;
     try {
-      if (MODE !== 'live' && MODE !== 'force' && MODE !== 'guardtest') throw new Error('live 3D is opt-in (?cp3d=live); showing the pre-rendered 3D characters');
       glCanvas = document.createElement('canvas');
       glCanvas.width = 512; glCanvas.height = 256;
-      const attrs = { premultipliedAlpha: true, alpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: false };
+      const attrs = { premultipliedAlpha: true, alpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: MODE!=='force' && MODE!=='guardtest' };
       gl = glCanvas.getContext('webgl2', attrs); gl2 = !!gl;
       if (!gl) gl = glCanvas.getContext('webgl', attrs) || glCanvas.getContext('experimental-webgl', attrs);
       if (!gl) throw new Error('no hardware WebGL');
       const dbg = gl.getExtension('WEBGL_debug_renderer_info');
       stats.renderer = String((dbg && gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) || gl.getParameter(gl.RENDERER) || '');
-      softGL = SOFTWARE.test(stats.renderer); // v0.9.4: software graphics still get 3D, in a light profile
+      softGL = SOFTWARE.test(stats.renderer);
+      if(softGL&&MODE==='live')throw new Error('Software GPU: use the baked animated characters instead.');
       if (MODE !== 'force' && guardBlocks()) throw new Error('3D was turned off on this device after an earlier start froze or failed (add ?cp3d=reset to retry)');
       stats.gl2 = gl2; stats.software = softGL;
       if (softGL) document.documentElement.classList.add('cp-lite'); // lighter CSS effects too

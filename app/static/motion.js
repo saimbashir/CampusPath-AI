@@ -22,7 +22,7 @@
   let frame = 0;
   let pending = null;
   document.addEventListener('pointermove', function (event) {
-    if (!finePointer.matches || reduce.matches) return;
+    if (!finePointer.matches || reduce.matches || document.hidden || document.documentElement.classList.contains('cp-lite')) return;
     const card = event.target && event.target.closest ? event.target.closest('.card') : null;
     if (!card) return;
     pending = { card: card, x: event.clientX, y: event.clientY };
@@ -48,9 +48,11 @@
     const suffix = match[2];
     const decimals = match[1].indexOf('.') === -1 ? 0 : 1;
     const started = performance.now();
-    const duration = 900;
+    const duration = 350;
     el.textContent = (0).toFixed(decimals) + suffix;
     function step(now) {
+      if(!el.isConnected)return;
+      if(document.hidden){el.textContent=text;return;}
       const t = Math.min(1, (now - started) / duration);
       const eased = 1 - Math.pow(1 - t, 3);
       el.textContent = t < 1 ? (target * eased).toFixed(decimals) + suffix : text;
@@ -108,7 +110,7 @@
   }
   function steady(el) { return !!el.querySelector('form, textarea, input, select, table, .graph, canvas'); }
   document.addEventListener('pointermove', function (event) {
-    if (!finePointer.matches || reduce.matches) return;
+    if (!finePointer.matches || reduce.matches || document.hidden || document.documentElement.classList.contains('cp-lite')) return;
     const el = event.target && event.target.closest ? event.target.closest(TILT) : null;
     if (el !== tiltEl) { untilt(tiltEl); tiltEl = el && !steady(el) ? el : null; }
     if (!tiltEl) return;
@@ -138,30 +140,32 @@
   /* 5. Scroll reveal: blocks that start below the fold rise in 3D when they scroll into view. */
   if ('IntersectionObserver' in window) {
     const REVEAL = '.content .card, .content .stat, .content .list-item, .content .next-card, .features .feature';
+    const watched = new Set();
     const io = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {
         if (!entry.isIntersecting) return;
         entry.target.classList.remove('cp3d-wait');
         entry.target.classList.add('cp3d-in');
-        io.unobserve(entry.target);
+        io.unobserve(entry.target);watched.delete(entry.target);
       });
     }, { rootMargin: '0px 0px -6% 0px', threshold: 0.06 });
     let revealFrame = 0;
     function scanReveal() {
       revealFrame = 0;
       if (reduce.matches) return;
+      watched.forEach(el=>{if(!el.isConnected){io.unobserve(el);watched.delete(el);}});
       const limit = window.innerHeight * 0.96;
       document.querySelectorAll(REVEAL).forEach(function (el) {
         if (el.dataset.cp3d) return;
         el.dataset.cp3d = '1';
         const r = el.getBoundingClientRect();
-        if (r.height && r.top > limit) { el.classList.add('cp3d-wait'); io.observe(el); }
+        if (r.height && r.top > limit) { el.classList.add('cp3d-wait'); watched.add(el);io.observe(el); }
       });
     }
     new MutationObserver(function (records) {
       if (revealFrame) return;
       // Ignore the animated characters' own updates (speech bubbles type every few ms).
-      const relevant = records.some(function (r) { return !(r.target.closest && r.target.closest('.cp-stage')); });
+      const relevant = records.some(function (r) { return !(r.target.closest && r.target.closest('.cp-stage')) && Array.from(r.addedNodes).concat(Array.from(r.removedNodes)).some(n=>n.nodeType===1); });
       if (relevant) revealFrame = requestAnimationFrame(scanReveal);
     }).observe(document.body, { childList: true, subtree: true });
     scanReveal();
@@ -184,7 +188,7 @@
     'viva-review': 'door', structure: 'fold', research: 'zoom'
   };
   let last = null;
-  let lastIndex = 0;
+  let lastIndex = 0, transitionId = 0;
   function styleFor(page) {
     if (FIXED[page]) return FIXED[page];
     let h = 0; for (const ch of String(page)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -206,13 +210,10 @@
     });
   }
   window.CampusTransition = {
-    leave: async function (page) {
-      const main = document.querySelector('#main.content');
-      if (!main || reduce.matches || !main.firstElementChild || main.querySelector(':scope > .loading')) return;
-      const dir = indexOf(page) >= lastIndex ? 'pt-fwd' : 'pt-back';
-      clear(main);
-      main.classList.add('pt-leave', 'pt-' + styleFor(last || page), dir);
-      await wait(main, 320);
+    leave: function (page) {
+      // Navigation must not wait for animation. Preserve the page-specific incoming 3D effect.
+      transitionId++;
+      const main=document.querySelector('#main.content');if(main)clear(main);
     },
     enter: function (page) {
       const main = document.querySelector('#main.content');
@@ -222,10 +223,10 @@
       if (!main) return;
       clear(main);
       if (reduce.matches) return;
-      void main.offsetWidth;
+      const id=++transitionId;
       main.classList.add('pt-enter', 'pt-' + styleFor(page), dir);
       if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'instant' in document.documentElement.style ? 'instant' : 'auto' });
-      wait(main, 900).then(function () { if (main.classList.contains('pt-enter')) clear(main); });
+      wait(main, 500).then(function () { if (id===transitionId&&main.classList.contains('pt-enter')) clear(main); });
     }
   };
 })();

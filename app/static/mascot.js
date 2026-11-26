@@ -158,7 +158,7 @@
      same 3D renderer) as a small image. It shows instantly on every load while the live 3D starts,
      and stays if a device cannot run live 3D. A pose without its own image uses that character's
      default image. */
-  const STILL_V = '0.9.5';
+  const STILL_V = '0.9.6-perf1';
   function stillKey(c, xs) {
     const spec = CAST[c.c] || CAST.pip;
     const face = Object.assign(baseFace(spec), c.face || {});
@@ -166,14 +166,20 @@
     let h = 2166136261; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
     return (h >>> 0).toString(16).padStart(8, '0');
   }
+  function poseUrl(c, xs) { return `/static/characters/${stillKey(c, xs)}.webp?v=${STILL_V}`; }
   function stillImg(c, xs, cls) {
     const name = CAST[c.c] ? c.c : 'pip';
-    return `<img class="cp-still ${cls}" src="/static/characters/${stillKey(c, xs)}.webp?v=${STILL_V}" data-c="${name}" alt="" decoding="async" draggable="false">`;
+    return `<img class="cp-still ${cls}" src="${poseUrl(c, xs)}" data-c="${name}" alt="" loading="eager" decoding="async" draggable="false">`;
   }
+  document.addEventListener('load', function (event) {
+    const img=event.target;
+    if(img && img.classList && img.classList.contains('cp-still') && img.parentElement) img.parentElement.dataset.cpReady='1';
+  }, true);
   document.addEventListener('error', function (event) {
     const img = event.target;
     if (!img || !img.classList || !img.classList.contains('cp-still')) return;
     if (!img.dataset.generic) { img.dataset.generic = '1'; const ctl = img.parentNode && img.parentNode._ctl; img.src = ctl && ctl.baseSrc && img.getAttribute('src') !== ctl.baseSrc ? ctl.baseSrc : `/static/characters/${img.dataset.c}.webp?v=${STILL_V}`; return; }
+    if(img.parentElement) img.parentElement.dataset.cpReady='1';
     img.outerHTML = `<span class="cp-fallback ${img.classList.contains('cp-wait') ? 'cp-wait' : ''}">${(CAST[img.dataset.c] || CAST.pip).emoji}</span>`;
   }, true);
   function baseFace(spec) { return { eyes: 0, mouth: spec.mouth || 0, brow: 0, blush: spec.blush ? 1 : 0 }; }
@@ -182,7 +188,7 @@
     const confetti = cfg.confetti ? '<div class="cp-confetti">' + Array.from({ length: 14 }, (_, i) => `<i style="--k:${i}"></i>`).join('') + '</div>' : '';
     return `<div class="cp-stage cp-${size}" aria-hidden="true" data-cp-id="${n}" style="--cn:${cfg.chars.length}">
       ${cfg.lines && cfg.lines.length ? '<div class="cp-say"><span class="cp-say-text"></span><i class="cp-caret"></i></div>' : ''}
-      <div class="cp-scene">${cfg.chars.map((c, i) => `<div class="cp-char" data-i="${i}" data-c="${c.c}"><canvas></canvas>${stillImg(c, /^xs\b/.test(size), 'cp-wait')}</div>`).join('')}${confetti}</div>
+      <div class="cp-scene">${cfg.chars.map((c, i) => `<div class="cp-char" data-i="${i}" data-c="${c.c}" data-emoji="${(CAST[c.c] || CAST.pip).emoji}"><canvas></canvas>${stillImg(c, /^xs\b/.test(size), 'cp-wait')}</div>`).join('')}${confetti}</div>
     </div>`;
   }
   function attachChars(el, cfg, locked) {
@@ -192,6 +198,7 @@
       const spec = CAST[c.c] || CAST.pip;
       const xs = size(el) === 'xs';
       if (!ok) { imageChar(box, c, xs, locked); return; }
+      const still=box.querySelector('img.cp-wait');if(still&&still.complete&&still.naturalWidth)box.dataset.cpReady='1';
       const face = Object.assign(baseFace(spec), c.face || {});
       const ctl = window.CP3D.attach(box.querySelector('canvas'), spec, {
         motion: c.motion || 'idle', prop: c.prop === undefined ? 'none' : c.prop, acc: c.acc, orbs: (c.orbs || []).slice(0, size(el) === 'xs' ? 0 : 4), face: face
@@ -207,16 +214,29 @@
   }
   /* Pre-rendered 3D character (default). Moods swap to that character's pre-rendered reaction. */
   function imageChar(box, c, xs, locked) {
-    box.innerHTML = stillImg(c, xs, 'cp-img');
-    const img = box.firstElementChild;
-    const ctl = { img: img, canvas: img, box: box, cfgChar: c, xs: xs, locked: !!locked, baseSrc: img.getAttribute('src') };
+    // Keep the existing in-flight WebP instead of destroying and requesting it twice.
+    let img=box.querySelector('img.cp-wait');
+    if(img){const canvas=box.querySelector('canvas');if(canvas)canvas.remove();img.classList.remove('cp-wait','cp-gone');img.classList.add('cp-img');}
+    else{box.innerHTML=stillImg(c,xs,'cp-img');img=box.firstElementChild;}
+    if(img.complete && img.naturalWidth)box.dataset.cpReady='1';
+    const ctl = { img: img, canvas: img, box: box, cfgChar: c, xs: xs, locked: !!locked, baseSrc: poseUrl(c,xs), desiredSrc: poseUrl(c,xs) };
     box._ctl = ctl; live.add(ctl);
   }
   function moodSrc(ctl, mood) { return mood ? `/static/characters/${ctl.img.dataset.c}-${mood}.webp?v=${STILL_V}` : ctl.baseSrc; }
   function size(el) { return el.classList.contains('cp-xs') ? 'xs' : el.classList.contains('cp-sm') ? 'sm' : 'md'; }
 
   function setMood(ctl, mood) {
-    if (ctl.img) { const want = moodSrc(ctl, mood); if (ctl.img.getAttribute('src') !== want) { delete ctl.img.dataset.generic; ctl.img.src = want; } return; }
+    if (ctl.img) {
+      const want=moodSrc(ctl,mood);
+      if(ctl.desiredSrc===want)return;
+      ctl.desiredSrc=want;
+      if(ctl.img.getAttribute('src')===want)return;
+      // Keep the existing animated character visible while the next reaction loads.
+      const next=new Image();next.className=ctl.img.className;next.dataset.c=ctl.img.dataset.c;next.alt='';next.draggable=false;next.decoding='async';
+      next.onload=function(){if(ctl.desiredSrc!==want||!ctl.img.isConnected)return;ctl.img.replaceWith(next);ctl.img=ctl.canvas=next;ctl.box.dataset.cpReady='1';};
+      next.onerror=function(){}; // a missing reaction must not erase the current character
+      next.src=want;return;
+    }
     const r = mood ? REACT[mood] : null;
     const b = ctl.base;
     if (!r) { ctl.motion = b.motion; ctl.prop = b.prop; ctl.face = Object.assign({}, b.face); return; }
@@ -303,6 +323,7 @@
   function one(c, motion, prop, orbs, face) { return { c: c, motion: motion, prop: prop || 'none', orbs: orbs || [], face: face }; }
 
   function decorate() {
+    live.forEach(ctl=>{if(!ctl.canvas.isConnected){live.delete(ctl);if(window.CP3D&&!ctl.img)window.CP3D.detach(ctl);}});
     const result = document.querySelector('#main .cp-result:not([data-cp])');
     if (result) decorateResult(result);
     const hasResult = !!document.querySelector('#main .cp-result');
@@ -371,11 +392,33 @@
     }
   }
 
+  const warmed=new Set();
+  let warmTimer=0,warmRunning=false;
+  function warmCharacters(){
+    clearTimeout(warmTimer);
+    const conn=navigator.connection;
+    if(warmRunning||document.hidden||reduce.matches||(conn&&(conn.saveData||/^(slow-)?2g$/.test(conn.effectiveType||''))))return;
+    warmTimer=setTimeout(function(){
+      if(document.hidden||warmRunning)return;
+      if(html.classList.contains('cp-busy')||Array.from(document.querySelectorAll('.cp-char img')).some(img=>!img.complete)){warmCharacters();return;}
+      const table=role()==='student'?STUDENT:role()==='teacher'?TEACHER:role()==='admin'?ADMIN:null;
+      if(!table)return;
+      const urls=Object.values(table).map(r=>poseUrl({c:r[0],motion:r[1],prop:r[2],orbs:r[3],acc:r[5]},false));
+      const shown=new Set(Array.from(document.querySelectorAll('.cp-char img'),img=>img.getAttribute('src')));
+      shown.forEach(url=>warmed.add(url));
+      const url=urls.find(x=>!warmed.has(x));if(!url)return;
+      warmed.add(url);warmRunning=true;
+      const run=()=>{if(document.hidden){warmRunning=false;warmed.delete(url);return;}
+        fetch(url,{credentials:'same-origin',priority:'low'}).then(r=>r.ok?r.arrayBuffer():null).catch(()=>{}).finally(()=>{warmRunning=false;warmCharacters();});};
+      if('requestIdleCallback' in window)window.requestIdleCallback(run,{timeout:2000});else setTimeout(run,0);
+    },1200);
+  }
+  document.addEventListener('visibilitychange',function(){html.classList.toggle('cp-hidden',document.hidden);if(!document.hidden)warmCharacters();});
   let scheduled = false;
   function schedule() {
     if (scheduled) return;
     scheduled = true;
-    requestAnimationFrame(function () { scheduled = false; decorate(); });
+    requestAnimationFrame(function () { scheduled = false; decorate(); warmCharacters(); });
   }
   /* Perf: decorate() only needs new elements, the voice status/orb and the sign-in error.
      Class changes elsewhere (card tilt, page transitions, reveal) used to re-run it on every
@@ -386,6 +429,7 @@
       if (!t || (t.closest && t.closest('.cp-stage'))) continue;
       if (r.type === 'attributes' && t.id !== 'voice-orb') continue;
       if (r.type === 'characterData' && !(t.closest && t.closest('#voice-status, #auth-error'))) continue;
+      if(r.type==='childList' && !(t.closest && t.closest('#voice-status, #auth-error')) && !Array.from(r.addedNodes).concat(Array.from(r.removedNodes)).some(n=>n.nodeType===1))continue;
       schedule();
       return;
     }
@@ -407,7 +451,7 @@
   }, { passive: true });
   let pf = 0, px = 0, py = 0, idleTimer = 0;
   document.addEventListener('pointermove', function (e) {
-    if (!finePointer.matches || !window.CP3D) return;
+    if (!finePointer.matches || reduce.matches || !window.CP3D || !Array.from(live).some(ctl=>!ctl.img)) return;
     px = e.clientX; py = e.clientY;
     clearTimeout(idleTimer);
     idleTimer = setTimeout(function () { window.CP3D.pointer(null); }, 2500);
@@ -423,7 +467,7 @@
   let pending = 0, busyTimer = 0;
   function setBusy() {
     if (pending > 0) {
-      if (!busyTimer && !html.classList.contains('cp-busy')) busyTimer = setTimeout(function () { busyTimer = 0; if (pending > 0) { html.classList.add('cp-busy'); applyAll(); } }, 380);
+      if (!busyTimer && !html.classList.contains('cp-busy')) busyTimer = setTimeout(function () { busyTimer = 0; if (pending > 0) { html.classList.add('cp-busy'); applyAll(); } }, 700);
     } else {
       clearTimeout(busyTimer); busyTimer = 0;
       if (html.classList.contains('cp-busy')) { html.classList.remove('cp-busy'); applyAll(); }

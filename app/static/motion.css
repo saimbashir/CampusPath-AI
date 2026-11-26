@@ -253,7 +253,7 @@
   #toast { animation: cp3d-toast .5s var(--ease) both; }
 
   /* Scroll reveal: content below the fold waits, then rises in 3D (set by motion.js). */
-  .content .cp3d-wait, .features .cp3d-wait { opacity: 0; animation: none !important; }
+  .content .cp3d-wait, .features .cp3d-wait { opacity: 1; animation: none !important; }
   .content .cp3d-in, .features .cp3d-in { animation: cp3d-rise .8s var(--ease) both !important; }
   .content .list-item.cp3d-in { animation-name: cp3d-fold !important; animation-duration: .6s !important; }
   .content .stat.cp3d-in { animation-name: cp3d-flip !important; }
@@ -304,41 +304,41 @@
 @media (max-width: 900px) { :root { --pt-k: .75; } }
 @media (max-width: 640px) { :root { --pt-k: .55; } }
 .workarea { perspective: 1600px; perspective-origin: 50% 20%; overflow-x: clip; }
-#main.pt-leave, #main.pt-enter { will-change: transform, opacity; backface-visibility: hidden; transform-style: preserve-3d; }
+#main.pt-leave, #main.pt-enter { will-change: transform, opacity; backface-visibility: hidden; }
 #main.pt-leave { animation-duration: .3s; animation-timing-function: cubic-bezier(.55, 0, .9, .4); animation-fill-mode: both; pointer-events: none; }
-#main.pt-enter { animation-duration: .62s; animation-timing-function: cubic-bezier(.16, .84, .24, 1); animation-fill-mode: both; }
+#main.pt-enter { animation-duration: .28s; animation-timing-function: cubic-bezier(.16, .84, .24, 1); animation-fill-mode: both; }
 #main.pt-back { --pt-s: -1; }
 #main { --pt-s: 1; }
 
 #main.pt-leave.pt-cube { animation-name: pt-cube-out; transform-origin: 50% 50% -40vw; }
 #main.pt-enter.pt-cube { animation-name: pt-cube-in; transform-origin: 50% 50% -40vw; }
 @keyframes pt-cube-out { to { opacity: 0; transform: rotateY(calc(-70deg * var(--pt-k) * var(--pt-s))); } }
-@keyframes pt-cube-in { from { opacity: 0; transform: rotateY(calc(70deg * var(--pt-k) * var(--pt-s))); } }
+@keyframes pt-cube-in { from { opacity: .78; transform: rotateY(calc(70deg * var(--pt-k) * var(--pt-s))); } }
 
 #main.pt-leave.pt-flip { animation-name: pt-flip-out; transform-origin: 50% 0; }
 #main.pt-enter.pt-flip { animation-name: pt-flip-in; transform-origin: 50% 0; }
 @keyframes pt-flip-out { to { opacity: 0; transform: rotateX(calc(55deg * var(--pt-k))) translateZ(-120px); } }
-@keyframes pt-flip-in { from { opacity: 0; transform: rotateX(calc(-60deg * var(--pt-k))) translateZ(-160px); } }
+@keyframes pt-flip-in { from { opacity: .78; transform: rotateX(calc(-60deg * var(--pt-k))) translateZ(-160px); } }
 
 #main.pt-leave.pt-door { animation-name: pt-door-out; transform-origin: 0 50%; }
 #main.pt-enter.pt-door { animation-name: pt-door-in; transform-origin: 100% 50%; }
 @keyframes pt-door-out { to { opacity: 0; transform: rotateY(calc(75deg * var(--pt-k) * var(--pt-s))); } }
-@keyframes pt-door-in { from { opacity: 0; transform: rotateY(calc(-75deg * var(--pt-k) * var(--pt-s))); } }
+@keyframes pt-door-in { from { opacity: .78; transform: rotateY(calc(-75deg * var(--pt-k) * var(--pt-s))); } }
 
 #main.pt-leave.pt-zoom { animation-name: pt-zoom-out; transform-origin: 50% 30%; }
 #main.pt-enter.pt-zoom { animation-name: pt-zoom-in; transform-origin: 50% 30%; }
-@keyframes pt-zoom-out { to { opacity: 0; transform: translateZ(calc(260px * var(--pt-k))); filter: blur(4px); } }
-@keyframes pt-zoom-in { from { opacity: 0; transform: translateZ(calc(-520px * var(--pt-k))) rotateX(calc(8deg * var(--pt-k))); } }
+@keyframes pt-zoom-out { to { opacity: 0; transform: translateZ(calc(260px * var(--pt-k))); } }
+@keyframes pt-zoom-in { from { opacity: .78; transform: translateZ(calc(-520px * var(--pt-k))) rotateX(calc(8deg * var(--pt-k))); } }
 
 #main.pt-leave.pt-fold { animation-name: pt-fold-out; transform-origin: 50% 100%; }
 #main.pt-enter.pt-fold { animation-name: pt-fold-in; transform-origin: 50% 0; }
 @keyframes pt-fold-out { to { opacity: 0; transform: rotateX(calc(-70deg * var(--pt-k))); } }
-@keyframes pt-fold-in { from { opacity: 0; transform: rotateX(calc(70deg * var(--pt-k))) translateY(-20px); } }
+@keyframes pt-fold-in { from { opacity: .78; transform: rotateX(calc(70deg * var(--pt-k))) translateY(-20px); } }
 
 #main.pt-leave.pt-swing { animation-name: pt-swing-out; transform-origin: 50% -30%; }
 #main.pt-enter.pt-swing { animation-name: pt-swing-in; transform-origin: 50% -30%; }
 @keyframes pt-swing-out { to { opacity: 0; transform: rotateZ(calc(-5deg * var(--pt-k) * var(--pt-s))) rotateY(calc(35deg * var(--pt-k) * var(--pt-s))) translateZ(-140px); } }
-@keyframes pt-swing-in { from { opacity: 0; transform: rotateZ(calc(5deg * var(--pt-k) * var(--pt-s))) rotateY(calc(-35deg * var(--pt-k) * var(--pt-s))) translateZ(-140px); } }
+@keyframes pt-swing-in { from { opacity: .78; transform: rotateZ(calc(5deg * var(--pt-k) * var(--pt-s))) rotateY(calc(-35deg * var(--pt-k) * var(--pt-s))) translateZ(-140px); } }
 
 @media (prefers-reduced-motion: reduce) { #main.pt-leave, #main.pt-enter { animation: none !important; } }
 
@@ -353,3 +353,11 @@
 .cp-lite .hero h1 span { animation: none !important; background-position: 0 center; }
 .cp-lite #main.pt-leave.pt-zoom { animation-name: pt-zoom-out-lite; }
 @keyframes pt-zoom-out-lite { to { opacity: 0; transform: translateZ(calc(260px * var(--pt-k))); } }
+
+/* Responsive performance: visible content comes first, with the same incoming 3D styles. */
+.cp-page-loading { min-height: 120px; height: auto; padding: 20px; background: var(--surface-2); animation: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .content > .page-heading, .content .card, .content .next-card, .content .empty, .content .quiz-card, .content .stats .stat, .content .list-item { animation-duration: .25s; animation-delay: 0s; }
+  .content .cp3d-in, .features .cp3d-in { animation-duration: .3s !important; }
+}
+@media (max-width: 640px) { :root { --pt-k: .35; } }

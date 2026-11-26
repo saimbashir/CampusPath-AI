@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import os
 import re
 from functools import lru_cache
 from pathlib import Path
 
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
@@ -55,7 +57,7 @@ class CachedStaticFiles(StaticFiles):
             if response.status_code == 200 and file_path and accepts and ctype.startswith(_COMPRESSIBLE):
                 st = os.stat(file_path)
                 if st.st_size >= 1024:
-                    body = _gzipped(str(file_path), st.st_mtime, st.st_size)
+                    body = await run_in_threadpool(_gzipped, str(file_path), st.st_mtime, st.st_size)
                     headers = {k: v for k, v in response.headers.items() if k.lower() not in ('content-length', 'content-type')}
                     headers['Content-Encoding'] = 'gzip'
                     return Response(body, status_code=200, headers=headers, media_type=ctype)
@@ -70,7 +72,7 @@ class SelectiveGZipMiddleware:
         self.gzip = GZipMiddleware(app, minimum_size=minimum_size, compresslevel=compresslevel)
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] == 'http' and not _NO_GZIP.match(scope.get('path', '')):
+        if scope['type'] == 'http' and not scope.get('path', '').startswith('/static/') and not _NO_GZIP.match(scope.get('path', '')):
             await self.gzip(scope, receive, send)
         else:
             await self.app(scope, receive, send)
@@ -107,8 +109,30 @@ def _template(path: str, mtime: float) -> str:
     return Path(path).read_text(encoding='utf-8')
 
 
+@lru_cache(maxsize=64)
+def _asset_hash(path: str, mtime_ns: int, size: int) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+_STATIC_ASSET = re.compile(r'(/static/([A-Za-z0-9_.-]+\.(?:css|js)))\?v=[^"\'<>\s]+')
+
+
+def _version_assets(html: str, static_root: Path) -> str:
+    """Use a content version rather than reusing a release number across changed files."""
+    def replace(match):
+        asset = static_root / match.group(2)
+        try:
+            info = asset.stat()
+            version = _asset_hash(str(asset), info.st_mtime_ns, info.st_size)
+        except OSError:
+            return match.group(0)
+        return f'{match.group(1)}?v={version}'
+    return _STATIC_ASSET.sub(replace, html)
+
+
 def render_shell(template: Path, request, private: bool = False) -> str:
     html = _template(str(template), template.stat().st_mtime)
+    html = _version_assets(html, template.parent.parent / 'static')
     path = request.url.path.rstrip('/') or '/'
     title, description = PUBLIC_ROUTES.get(path, PUBLIC_ROUTES['/'])
     base = public_base_url(request)
