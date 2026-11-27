@@ -59,16 +59,19 @@ def test_runtime_course_material_viva_audio_review_analytics(clients,monkeypatch
         ws.send_bytes(b'\0\x10'*4096);ws.send_json({'type':'finish'});assert ws.receive_json()['type']=='transcribing';transcript=ws.receive_json();assert transcript['review_required'] and not transcript['raw_audio_stored']
     monkeypatch.setattr(grounded,'enabled',lambda:True);monkeypatch.setattr(grounded,'structured_generation',structured_fake)
     result=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':0,'transcript':transcript['text']}))
-    assert result['status']=='TEACHER_REVIEW_REQUIRED' and result['ai_proposed_marks']==4 and result['confirmed_marks'] is None
-    assert sum(c['marks'] for c in result['responses'][0]['evaluation']['scoring'])==4
+    assert result['status']=='TEACHER_REVIEW_REQUIRED' and result['ai_proposed_marks'] is None and result['confirmed_marks'] is None
+    assert 'evaluation' not in result['responses'][0]
+    teacher_result=good(t.get(f'/api/courses/{cid}/oral-review'))[0]
+    assert teacher_result['ai_proposed_marks']==4 and sum(c['marks'] for c in teacher_result['responses'][0]['evaluation']['scoring'])==4
     review=good(t.put(f"/api/oral-sessions/{session['id']}/questions/{qid}/review",json={'marks':4.5,'feedback':'Good answer with sufficient explanation.'}))
     assert review['confirmed_marks'] is None
     final=good(t.post(f"/api/oral-sessions/{session['id']}/finalize"));assert final['confirmed_marks']==4.5 and final['percentage']==90
     assert t.post(f"/api/oral-sessions/{session['id']}/finalize").status_code==409
-    student=good(s.get(f"/api/oral-sessions/{session['id']}"));assert student['confirmed_marks']==4.5
+    student=good(s.get(f"/api/oral-sessions/{session['id']}"));assert student['confirmed_marks'] is None and student['reviews']==[]
     analytics=good(t.get(f'/api/courses/{cid}/viva-analytics'));assert analytics['class_average']==90 and analytics['finalized']==1
     directory=good(t.get(f'/api/courses/{cid}/students'));assert directory[0]['viva_average']==90
-    assert any('4.5/5' in x['message'] for x in good(s.get('/api/notifications')))
+    assert any('has been reviewed' in x['message'] for x in good(s.get('/api/notifications')))
+    assert not any('4.5/5' in x['message'] for x in good(s.get('/api/notifications')))
 
 def test_followup_context_and_marks_are_not_double_counted(clients,monkeypatch):
     t,s,cid,rid,_=course_flow(clients,*MATERIALS[2]);ex=create_exam(t,cid,rid,follow_up_depth=1,immediate_feedback=False)
@@ -84,7 +87,8 @@ def test_followup_context_and_marks_are_not_double_counted(clients,monkeypatch):
     first=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':0,'transcript':'Sequence numbers order bytes.'}))
     assert first['question']['is_follow_up'] and not first['complete'] and 'evaluation' not in first['responses'][0]
     second=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':1,'transcript':'The receiver uses sequence numbers to assemble the ordered byte stream.'}))
-    assert second['complete'] and second['ai_proposed_marks']==4 and len(second['responses'])==2
+    assert second['complete'] and second['ai_proposed_marks'] is None and len(second['responses'])==2
+    assert good(t.get(f'/api/courses/{cid}/oral-review'))[0]['ai_proposed_marks']==4
     assert calls[1]['conversation'][0]['answer']=='Sequence numbers order bytes.'
     assert s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':1,'transcript':'replay'}).status_code==409
 
@@ -117,7 +121,8 @@ def test_evaluator_bad_citation_falls_back_without_marks(clients,monkeypatch):
         r=await structured_fake(instruction,context,schema);r.citations=[grounded.Citation(chunk_id=999999,quote='Invented outside-source evidence')];return r
     monkeypatch.setattr(grounded,'enabled',lambda:True);monkeypatch.setattr(grounded,'structured_generation',invalid)
     r=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':0,'transcript':'A sample explanation of producers.'}))
-    assert r['complete'] and r['ai_proposed_marks'] is None and r['responses'][0]['provider']=='PROVIDER FALLBACK'
+    assert r['complete'] and r['ai_proposed_marks'] is None and 'provider' not in r['responses'][0]
+    assert good(t.get(f'/api/courses/{cid}/oral-review'))[0]['responses'][0]['provider']=='PROVIDER FALLBACK'
 
 def test_flags_limits_and_finish_unanswered(clients):
     t,s,cid,rid,_=course_flow(clients,*MATERIALS[1]);ex=create_exam(t,cid,rid,count=2);session=good(s.post(f"/api/vivas/{ex['id']}/start"));sid=session['id']
@@ -130,14 +135,15 @@ def test_flags_limits_and_finish_unanswered(clients):
     final=good(t.post(f'/api/oral-sessions/{sid}/finalize'));assert final['confirmed_marks']==0
     assert t.put(f"/api/oral-sessions/{sid}/questions/{questions[0]['id']}/review",json={'marks':5,'feedback':'late overwrite'}).status_code==409
 
-def test_auto_finalize_only_explicit_and_no_unreviewed_mastery(clients,monkeypatch):
+def test_teacher_confirmation_required_and_no_unreviewed_mastery(clients,monkeypatch):
     t,s,cid,rid,_=course_flow(clients,*MATERIALS[3]);ex=create_exam(t,cid,rid,review_required=False);session=good(s.post(f"/api/vivas/{ex['id']}/start"))
     before=good(s.get(f'/api/courses/{cid}/students/2/progress'))['mastery']
     monkeypatch.setattr(grounded,'enabled',lambda:True);monkeypatch.setattr(grounded,'structured_generation',structured_fake)
     final=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':0,'transcript':'Producers store energy through conversion of sunlight.'}))
-    assert final['status']=='FINALIZED' and final['confirmed_marks']==4
+    assert final['status']=='TEACHER_REVIEW_REQUIRED' and final['confirmed_marks'] is None
+    assert good(t.get(f'/api/courses/{cid}/oral-review'))[0]['ai_proposed_marks']==4
     assert good(s.get(f'/api/courses/{cid}/students/2/progress'))['mastery']==before
-    assert 'AUTO-FINALIZED' in final['reviews'][0]['feedback']
+    assert final['reviews']==[]
 
 def test_material_only_filters_private_retrieval_and_unlinked_mcqs(clients):
     t,s,cid,rid,_=course_flow(clients,*MATERIALS[3])

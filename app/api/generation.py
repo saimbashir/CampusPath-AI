@@ -10,8 +10,10 @@ from app.knowledge_graph.engine import validate_dag
 from app.config import DEMO_MODE
 router=APIRouter(prefix='/api/courses')
 def evidence(db,cid,limit=300):
-    rows=db.execute(select(Chunk,Resource).join(Resource,Resource.id==Chunk.resource_id).where(Resource.course_id==cid,Resource.owner_id.is_(None)).order_by(Resource.id,Chunk.id).limit(limit)).all()
-    if not rows:raise HTTPException(409,'Upload course material first.')
+    rows=db.execute(select(Chunk,Resource).join(Resource,Resource.id==Chunk.resource_id).where(Resource.course_id==cid,Resource.owner_id.is_(None),Resource.status=='ready').order_by(Resource.id,Chunk.id).limit(limit)).all()
+    if not rows:
+        from app.services.materials import resolve,MaterialScope
+        return resolve(db,cid,MaterialScope(),limit=limit)
     return [{'id':c.id,'text':c.text,'filename':r.filename,'location':c.location} for c,r in rows]
 def focus(context,text,n):
     """The n excerpts most related to a topic (simple word overlap), in book order."""
@@ -87,35 +89,63 @@ async def generate_question(cid:int,data:GenerationInput,user=Depends(current_us
     return {'draft':draft.question.model_dump(),'review_required':True,'checks':['Valid option count','Valid answer index','No exact duplicate','Source IDs authorized','Topic matches request'],'sources':[mapping[i] for i in draft.source_ids],'limitation':'Correctness, ambiguity and Bloom alignment still require teacher judgment.'}
 
 class BatchGenerationInput(GenerationInput):
+    topic_id:int|None=None
+    page_from:int|None=Field(default=None,ge=1)
+    page_to:int|None=Field(default=None,ge=1)
+    heading:str=Field(default='',max_length=200)
     count:int=Field(default=10,ge=4,le=20)
 
 @router.post('/{cid}/questions/generate-batch',status_code=201)
 async def generate_batch(cid:int,data:BatchGenerationInput,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True);throttle(db,'generation:'+str(user.id),15)
-    topic=db.get(Topic,data.topic_id)
-    if not topic or topic.course_id!=cid:raise HTTPException(404,'Topic not found.')
+    topic=db.get(Topic,data.topic_id) if data.topic_id is not None else None
+    if data.topic_id is not None and (not topic or topic.course_id!=cid):raise HTTPException(404,'Topic not found.')
     from app.ai import grounded
-    from app.services.materials import MaterialScope,resolve
+    from app.services.materials import MaterialScope,resolve,source_topic,spread
+    from app.models import Course
     if not grounded.enabled():raise HTTPException(503,'Configure the language-model provider to generate a varied question bank. Teacher-authored questions remain available.')
-    scope=MaterialScope(resource_ids=data.resource_ids,chapters=data.chapters)
-    if not data.resource_ids and not data.chapters and (topic.structure or {}).get('source_ids'):scope.chunk_ids=topic.structure['source_ids']
-    context=resolve(db,cid,scope)
-    config={'count':data.count,'total_marks':data.count,'difficulty':'Mixed','question_types':['MCQ'],'bloom_distribution':{},'force_topic_id':topic.id,'coverage_instruction':'Cover distinct definitions, relationships, applications, examples, boundary cases and misconceptions actually supported by the material. Do not paraphrase the same fact repeatedly. Explain the correct rule and why distractors fail in simple language.'}
+    try:scope=MaterialScope(resource_ids=data.resource_ids,chapters=data.chapters,page_from=data.page_from,page_to=data.page_to,heading=data.heading)
+    except ValueError as exc:raise HTTPException(422,'Invalid page/slide range.') from exc
+    if topic and not (data.resource_ids or data.chapters or data.page_from or data.page_to or data.heading):
+        if (topic.structure or {}).get('source_ids'):scope.chunk_ids=topic.structure['source_ids']
+        else:scope.heading=topic.name
+    context=resolve(db,cid,scope,limit=None)
+    context=spread(context,min(len(context),max(12,data.count*3)))
+    config={'count':data.count,'total_marks':data.count,'difficulty':'Mixed','question_types':['MCQ'],'bloom_distribution':{},'force_topic_id':topic.id if topic else None,'coverage_instruction':'Cover distinct definitions, relationships, applications, examples, boundary cases and misconceptions actually supported by the material. Do not paraphrase the same fact repeatedly. Explain the correct rule and why distractors fail in simple language.'}
     existing=set(db.scalars(select(Question.prompt).where(Question.course_id==cid)))
     try:
         # grounded.questions keeps only questions that pass every check and keeps asking
         # (in small requests) until the requested number is reached.
-        drafts,provider=await grounded.questions(context,[{'id':topic.id,'name':topic.name,'description':topic.description,'source_ids':(topic.structure or {}).get('source_ids',[])}],config,existing_prompts=list(existing))
+        drafts,provider=await grounded.questions(context,[{'id':topic.id,'name':topic.name,'description':topic.description,'source_ids':(topic.structure or {}).get('source_ids',[])}] if topic else [],config,existing_prompts=list(existing))
         prompts=set()
         for q in drafts:
-            if len(set(q.options))!=len(q.options) or any(not o.strip() for o in q.options) or q.question_type!='MCQ' or q.topic_id!=topic.id or q.question_text in existing or q.question_text.casefold() in prompts:raise ValueError('Invalid topic/type or duplicate question.')
+            if len(set(q.options))!=len(q.options) or any(not o.strip() for o in q.options) or q.question_type!='MCQ' or (topic is not None and q.topic_id!=topic.id) or q.question_text in existing or q.question_text.casefold() in prompts:raise ValueError('Invalid topic/type or duplicate question.')
             prompts.add(q.question_text.casefold())
+        db.execute(select(Course.id).where(Course.id==cid).with_for_update()).scalar_one()
+        topics=list(db.scalars(select(Topic).where(Topic.course_id==cid)));mapping={s['id']:s for s in context}
         for q in drafts:
+            if not q.citations or any(c.chunk_id not in mapping for c in q.citations):raise ValueError('Invalid source citation.')
+            selected=topic or source_topic(db,cid,mapping[q.citations[0].chunk_id],topics)
             explanation=' '.join(q.acceptable_answer_points)
-            db.add(Question(course_id=cid,topic_id=topic.id,prompt=q.question_text,options=q.options,correct=q.correct_option,explanation=explanation,misconception='; '.join(q.possible_misconceptions),difficulty=q.difficulty,bloom=q.bloom,approved=False,source='AI material-grounded batch; teacher review required',source_ids=[c.chunk_id for c in q.citations]))
+            db.add(Question(course_id=cid,topic_id=selected.id,prompt=q.question_text,options=q.options,correct=q.correct_option,explanation=explanation,misconception='; '.join(q.possible_misconceptions),difficulty=q.difficulty,bloom=q.bloom,approved=False,source='AI material-grounded batch; teacher review required',source_ids=[c.chunk_id for c in q.citations]))
         audit(db,user,'question batch drafted',cid);db.commit()
     except Exception as exc:
         db.rollback()
         detail=str(exc) if isinstance(exc,ValueError) and 'questions passed' in str(exc) else 'The batch failed source, topic or duplicate validation.'
         raise HTTPException(502,detail+' No questions were saved. Try a smaller batch or narrower material selection.')
     return {'created':len(drafts),'review_required':True,'message':'Review and approve each draft in the question bank before students can use it.'}
+
+
+@router.post('/{cid}/material-topics')
+def material_topics(cid:int, data:dict, user=Depends(current_user), db=Depends(get_db)):
+    course_access(db,user,cid,True)
+    from app.services.materials import MaterialScope,resolve,spread,source_topic
+    from app.models import Course
+    try:scope=MaterialScope.model_validate(data)
+    except ValueError as exc:raise HTTPException(422,'Invalid source selection.') from exc
+    evidence=spread(resolve(db,cid,scope,limit=None),30)
+    db.execute(select(Course.id).where(Course.id==cid).with_for_update()).scalar_one()
+    topics=list(db.scalars(select(Topic).where(Topic.course_id==cid)))
+    for source in evidence:source_topic(db,cid,source,topics)
+    db.commit()
+    return {'topics':[{'id':t.id,'name':t.name,'description':t.description,'prerequisites':t.prerequisites,'clo':t.clo,'difficulty':t.difficulty} for t in topics]}

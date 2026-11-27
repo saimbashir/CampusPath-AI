@@ -138,7 +138,9 @@ def extract_sections(filename,data):
         ppt=Presentation(BytesIO(data))
         parts=[]
         for i,slide in enumerate(ppt.slides):
-            texts=[shape.text for shape in slide.shapes if shape.has_text_frame]
+            title=slide.shapes.title
+            texts=([title.text] if title is not None and title.has_text_frame else [])
+            texts.extend(shape.text for shape in slide.shapes if shape.has_text_frame and (title is None or shape.shape_id!=title.shape_id))
             # Tables and speaker notes often hold the real teaching content.
             for shape in slide.shapes:
                 if getattr(shape,'has_table',False) and shape.has_table:

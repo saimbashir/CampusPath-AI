@@ -81,7 +81,7 @@ def teacher_question(q):return {'id':q.id,'approved':q.approved,**{k:v for k,v i
 
 def exam_payload(db,ex,teacher=False):
     conf=ex.config
-    result={'id':ex.id,'course_id':ex.course_id,'title':ex.title,'status':ex.status,'count':conf['count'],'total_marks':conf['total_marks'],'minutes':conf['minutes'],'starts':conf.get('starts'),'ends':conf.get('ends'),'review_required':conf['review_required'],'immediate_feedback':conf['immediate_feedback'],'personalize_questions':conf.get('personalize_questions',False),'created':ex.created}
+    result={'id':ex.id,'course_id':ex.course_id,'title':ex.title,'status':ex.status,'count':conf['count'],'total_marks':conf['total_marks'],'minutes':conf['minutes'],'starts':conf.get('starts'),'ends':conf.get('ends'),'review_required':True,'immediate_feedback':False,'personalize_questions':conf.get('personalize_questions',False),'created':ex.created}
     if teacher:result.update(scope=ex.scope,config=conf,questions=[teacher_question(q) for q in db.scalars(select(VivaQuestion).where(VivaQuestion.viva_id==ex.id).order_by(VivaQuestion.id))])
     return result
 
@@ -89,19 +89,25 @@ def latest_responses(db,s):
     records=db.scalars(select(OralResponse).where(OralResponse.session_id==s.id).order_by(OralResponse.turn)).all()
     return records,{r.question_id:r for r in records}
 
+def notify_formal_review(db,s,ex):
+    from app.models import Course,TeacherAssignment
+    recipients={db.get(Course,ex.course_id).teacher_id}|set(db.scalars(select(TeacherAssignment.teacher_id).where(TeacherAssignment.course_id==ex.course_id)))
+    for uid in recipients:notify(db,uid,ex.course_id,f'oral-review:{s.id}','Viva ready for marking',ex.title+' has a submitted session awaiting confirmation.','oral-review')
+
 def finish_expired(db,s):
-    if s.status=='IN_PROGRESS' and s.expires<=now():s.status='TEACHER_REVIEW_REQUIRED';s.submitted=now();db.commit()
+    if s.status=='IN_PROGRESS' and s.expires<=now():
+        s.status='TEACHER_REVIEW_REQUIRED';s.submitted=now();notify_formal_review(db,s,db.get(VivaExam,s.viva_id));db.commit()
 
 def session_payload(db,s,ex,teacher=False):
     finish_expired(db,s);records,latest=latest_responses(db,s);questions=[db.get(VivaQuestion,qid) for qid in s.question_ids]
     reviews={r.question_id:r for r in db.scalars(select(OralReview).where(OralReview.session_id==s.id))}
-    complete=s.status!='IN_PROGRESS';feedback=teacher or complete or ex.config['immediate_feedback']
+    complete=s.status!='IN_PROGRESS';feedback=teacher
     proposed=[latest[q.id].proposed_marks if q.id in latest else (0 if complete else None) for q in questions]
     total_ai=round(sum(proposed),2) if complete and all(v is not None for v in proposed) else None
     confirmed=round(sum(r.marks for r in reviews.values()),2) if s.status=='FINALIZED' else None
-    result={'id':s.id,'viva_id':ex.id,'title':ex.title,'course_id':ex.course_id,'status':s.status,'index':s.cursor,'turn':s.turn,'total':len(questions),'total_marks':ex.config['total_marks'],'expires':s.expires,'created':s.created,'complete':complete,'follow_up_depth':s.follow_depth,'immediate_feedback':ex.config['immediate_feedback'],'ai_proposed_marks':total_ai,'confirmed_marks':confirmed,'percentage':round(100*confirmed/ex.config['total_marks'],1) if confirmed is not None else None,'review_required':ex.config['review_required']}
+    result={'id':s.id,'viva_id':ex.id,'title':ex.title,'course_id':ex.course_id,'status':s.status,'index':s.cursor,'turn':s.turn,'total':len(questions),'total_marks':ex.config['total_marks'],'expires':s.expires,'created':s.created,'complete':complete,'follow_up_depth':s.follow_depth,'immediate_feedback':False,'ai_proposed_marks':total_ai if teacher else None,'confirmed_marks':confirmed if teacher else None,'percentage':round(100*confirmed/ex.config['total_marks'],1) if teacher and confirmed is not None else None,'review_required':True}
     result['responses']=[{'id':r.id,'question_id':r.question_id,'prompt':r.prompt,'transcript':r.transcript,'depth':r.depth,'created':r.created,**({'evaluation':{k:v for k,v in r.evaluation.items() if k not in ('follow_up','follow_up_citations')},'proposed_marks':r.proposed_marks,'provider':r.provider} if feedback else {})} for r in records]
-    result['reviews']=[{'question_id':r.question_id,'marks':r.marks,'feedback':r.feedback,'flagged':r.flagged,'finalized':r.finalized} for r in reviews.values()] if teacher or complete else []
+    result['reviews']=[{'question_id':r.question_id,'marks':r.marks,'feedback':r.feedback,'flagged':r.flagged,'finalized':r.finalized} for r in reviews.values()] if teacher else []
     if not complete:
         q=questions[s.cursor];prompt=s.next_prompt['text'] if s.next_prompt else q.prompt
         result['question']={'id':q.id,'question_text':prompt,'marks':q.marks,'type':q.content['question_type'],'topic':db.get(Topic,q.topic_id).name if q.topic_id and ex.config['show_topic'] else None,'is_follow_up':s.follow_depth>0,'options':q.content.get('options',[])}
@@ -119,7 +125,7 @@ def create(cid:int,data:CreateViva,user=Depends(current_user),db=Depends(get_db)
     course_access(db,user,cid,True);resolve(db,cid,data.scope)
     enrolled=set(db.scalars(select(Enrollment.student_id).where(Enrollment.course_id==cid)))
     if not set(data.config.student_ids)<=enrolled:raise HTTPException(422,'Assigned students must be enrolled in this section.')
-    ex=VivaExam(course_id=cid,teacher_id=user.id,title=data.title,config=data.config.model_dump(mode='json'),scope=data.scope.model_dump(),status='DRAFT');db.add(ex);audit(db,user,'viva created',cid);db.commit();return exam_payload(db,ex,True)
+    ex=VivaExam(course_id=cid,teacher_id=user.id,title=data.title,config={**data.config.model_dump(mode='json'),'review_required':True,'immediate_feedback':False},scope=data.scope.model_dump(),status='DRAFT');db.add(ex);audit(db,user,'viva created',cid);db.commit();return exam_payload(db,ex,True)
 @router.get('/vivas/{eid}')
 def get_exam(eid:int,user=Depends(current_user),db=Depends(get_db)):
     ex=exam_access(db,user,eid);return exam_payload(db,ex,user.role=='teacher')
@@ -242,7 +248,10 @@ def publish(eid:int,user=Depends(current_user),db=Depends(get_db)):
     for q in qs:
         try:validate_citations(q.content['citations'],context)
         except ValueError as exc:raise HTTPException(422,str(exc))
-    ex.status='PUBLISHED';audit(db,user,'viva published',eid);db.commit();return exam_payload(db,ex,True)
+    ex.status='PUBLISHED'
+    from app.services.notifications import notify_published_viva
+    notify_published_viva(db,ex)
+    audit(db,user,'viva published',eid);db.commit();return exam_payload(db,ex,True)
 @router.post('/vivas/{eid}/start')
 def start(eid:int,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');ex=exam_access(db,user,eid)
@@ -303,12 +312,12 @@ async def answer(sid:int,data:OralAnswer,user=Depends(current_user),db=Depends(g
     claim=db.execute(update(OralSession).where(OralSession.id==sid,OralSession.turn==turn,OralSession.status=='IN_PROGRESS',OralSession.expires>now()).values(turn=turn+1,cursor=newcursor,follow_depth=newdepth,next_prompt={'text':follow,'citations':evaluation.get('follow_up_citations',[])} if follow else None,status='TEACHER_REVIEW_REQUIRED' if complete else 'IN_PROGRESS',submitted=now() if complete else None))
     if claim.rowcount!=1:db.rollback();raise HTTPException(409,'Session changed or time expired while evaluating. Refresh the saved session.')
     r=OralResponse(session_id=sid,question_id=q.id,turn=turn,depth=depth,prompt=prompt,transcript=data.transcript,evaluation=evaluation,proposed_marks=proposed,provider=provider);db.add(r);db.commit();db.refresh(s)
-    if complete and not ex.config['review_required']:auto_finalize(db,s,ex)
+    if complete:notify_formal_review(db,s,ex);db.commit()
     return session_payload(db,s,ex)
 @router.post('/oral-sessions/{sid}/finish')
 def finish(sid:int,user=Depends(current_user),db=Depends(get_db)):
     s,ex=session_access(db,user,sid)
-    if s.status=='IN_PROGRESS':s.status='TEACHER_REVIEW_REQUIRED';s.submitted=now();db.commit()
+    if s.status=='IN_PROGRESS':s.status='TEACHER_REVIEW_REQUIRED';s.submitted=now();notify_formal_review(db,s,ex);db.commit()
     return session_payload(db,s,ex)
 @router.get('/courses/{cid}/oral-history')
 def history(cid:int,user=Depends(current_user),db=Depends(get_db)):
@@ -351,7 +360,7 @@ def finalize(db,s,ex,user,automated=False):
             db.refresh(m);r.mastery_before=before;r.mastery_after=after
             for due in revision_dates(now(),after):db.add(Revision(student_id=s.student_id,topic_id=q.topic_id,due=due))
     total=round(sum(r.marks for r in reviews),2)
-    notify(db,s.student_id,ex.course_id,f'oral-final:{s.id}',ex.title+' graded',f'{ex.title} graded: {total:g}/{ex.config["total_marks"]:g}. '+('Auto-finalized under the teacher-enabled policy.' if automated else 'Your teacher confirmed the final result.'),'formal-viva')
+    notify(db,s.student_id,ex.course_id,f'oral-final:{s.id}',ex.title+' graded',f'{ex.title} has been reviewed. Contact your teacher for feedback.','formal-viva')
     audit(db,user,'viva auto-finalized' if automated else 'viva finalized',s.id);db.commit();db.refresh(s)
 
 def auto_finalize(db,s,ex):

@@ -32,7 +32,11 @@ def join(data:CodeInput,user=Depends(current_user),db=Depends(get_db)):
     c=db.scalar(select(Course).where(Course.enrollment_code==data.code))
     if not c:raise HTTPException(404,'Invalid enrollment code.')
     db.add(Enrollment(course_id=c.id,student_id=user.id))
-    try:db.commit()
+    try:
+        db.flush()
+        from app.services.notifications import refresh_course_updates
+        refresh_course_updates(db,user,[c.id])
+        db.commit()
     except IntegrityError:db.rollback();raise HTTPException(409,'Already enrolled.')
     return course_dict(c,user)
 @router.get('/courses/{cid}/topics')
@@ -77,6 +81,8 @@ def upload(cid:int,file:UploadFile=File(...),user=Depends(current_user),db=Depen
     db.add(ResourceBlob(resource_id=r.id,data=data,content_type='application/octet-stream'))
     if background:
         # Large book: answer now, read it in the background (avoids host request timeouts).
+        from app.services.notifications import notify_material
+        notify_material(db,r)
         audit(db,user,'resource queued',r.id);db.commit();start_background(r.id)
         return {'id':r.id,'chunks':0,'status':'processing','message':'Upload received. The document is being read in the background; refresh Materials in a minute.','vector_status':'Indexing in the background'}
     try:count=index_resource(db,r,data)
@@ -85,6 +91,8 @@ def upload(cid:int,file:UploadFile=File(...),user=Depends(current_user),db=Depen
         message=str(e) if isinstance(e,ValueError) else 'Could not parse this document. Check its format and encryption.'
         raise HTTPException(422,message)
     r.status_detail=f'{count} source excerpts indexed.'
+    from app.services.notifications import notify_material
+    notify_material(db,r)
     audit(db,user,'resource indexed',r.id);db.commit()
     vector_status=semantic_index(db,r.id)
     return {'id':r.id,'chunks':count,'status':'ready','message':'Text indexed. Source locations retained.','vector_status':vector_status}
@@ -93,7 +101,8 @@ def read_resource(cid:int,rid:int,user=Depends(current_user),db=Depends(get_db))
     course_access(db,user,cid)
     r=db.get(Resource,rid)
     if not r or r.course_id!=cid or r.owner_id not in (None,user.id):raise HTTPException(404,'Resource not found.')
-    return {'filename':r.filename,'chunks':[{'id':c.id,'location':c.location,'text':c.text,'structure':c.structure or {}} for c in db.scalars(select(Chunk).where(Chunk.resource_id==rid))]}
+    from app.services.materials import source_metadata
+    return {'filename':r.filename,'chunks':[{'id':c.id,'location':c.location,'text':c.text,'structure':source_metadata(c.location,c.text,c.structure)} for c in db.scalars(select(Chunk).where(Chunk.resource_id==rid))]}
 @router.get('/courses/{cid}/questions')
 def questions(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)

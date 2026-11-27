@@ -60,7 +60,8 @@ def test_viva_does_not_repeat_current_question(clients,monkeypatch):
         return {'correctness':'partially_correct','feedback':'A relevant point was made.','confidence':.8,'marks':3,'scoring':[],'correct_points':[],'incorrect_points':[],'missing_points':[],'misconceptions':[],'follow_up':question['current_prompt'],'follow_up_citations':[]},'AI PROVISIONAL'
     monkeypatch.setattr(grounded,'evaluate',repeating)
     result=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':0,'transcript':'Sequence numbers support ordered delivery.'}))
-    assert result['complete'] and result['ai_proposed_marks']==3
+    assert result['complete'] and result['ai_proposed_marks'] is None
+    assert good(t.get(f'/api/courses/{cid}/oral-review'))[0]['ai_proposed_marks']==3
     from app.models import OralResponse
     with SessionLocal() as db:
         saved=db.scalar(select(OralResponse).where(OralResponse.session_id==session['id']))

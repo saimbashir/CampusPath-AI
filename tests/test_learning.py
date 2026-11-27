@@ -78,7 +78,9 @@ def test_assignment_grading_and_privacy(clients):
     sid=t.get('/api/courses/1/assignments').json()[0]['submissions'][0]['id']
     assert a.post(f'/api/submissions/{sid}/grade',json={'grade':100}).status_code==404
     assert t.post(f'/api/submissions/{sid}/grade',json={'grade':85,'feedback':'Well reasoned.'}).status_code==200
-    assert a.get('/api/courses/1/assignments').json()[0]['submissions'][0]['grade']==85
+    assert a.get('/api/courses/1/assignments').json()[0]['submissions'][0]['grade'] is None
+    assert a.get('/api/courses/1/assignments').json()[0]['submissions'][0]['graded']
+    assert t.get('/api/courses/1/assignments').json()[0]['submissions'][0]['grade']==85
     assert a.post('/api/assignments/1/submit',json={'text':'overwrite'}).status_code==409
 
 def test_safe_upload_and_real_location(clients):

@@ -3,16 +3,25 @@ import os
 from fastapi import APIRouter,Depends,HTTPException
 from sqlalchemy import select,update,delete
 from app.db import get_db
-from app.models import VivaSession,VivaTurn,Topic,Mastery,Revision,Misconception,User,now
+from app.models import VivaSession,VivaTurn,Topic,Mastery,Revision,Misconception,User,Course,now
 from app.schemas import VivaStart,VivaAnswer,VivaReview
 from app.auth.security import current_user,course_access,role,audit,throttle
 from app.services.learning import snapshot
 from app.mastery.engine import update_mastery,revision_dates
-from app.ai.viva import evaluate,offline_evaluation
+from app.ai.viva import evaluate,offline_evaluation,material_questions,evaluate_material
+from app.services.materials import source_topic
 from app.ai.viva_variation import prompt_for_turn
 from app.config import DEMO_MODE
 router=APIRouter(prefix='/api')
+def material_entry(session,index=None):
+    i=session.cursor if index is None else index
+    if i>=len(session.topic_ids):return None
+    entry=session.topic_ids[i]
+    return entry if isinstance(entry,dict) else None
+
 def prompt_for(db,session):
+    entry=material_entry(session)
+    if entry:return db.get(Topic,entry['topic_id']),entry['prompt']
     topic=db.get(Topic,session.topic_ids[session.cursor])
     style,prompt=prompt_for_turn(session.id,session.student_id,session.course_id,session.cursor,topic.name)
     return topic,prompt
@@ -22,19 +31,49 @@ def payload(db,session):
     result={'id':session.id,'index':session.cursor,'total':len(session.topic_ids),'complete':session.cursor>=len(session.topic_ids) or session.expires<now(),
         'turns':[{'id':t.id,'topic_id':t.topic_id,'prompt':t.prompt,'answer':t.answer,'evaluation':t.evaluation,'provider':t.provider,'proposed_score':t.proposed_score,'reviewed_score':t.reviewed_score,'teacher_feedback':t.teacher_feedback,'mastery_before':t.mastery_before,'mastery_after':t.mastery_after} for t in turns]}
     if not result['complete']:
-        topic,prompt=prompt_for(db,session);result['question']={'topic_id':topic.id,'topic':topic.name,'prompt':prompt,'style':prompt_for_turn(session.id,session.student_id,session.course_id,session.cursor,topic.name)[0]}
+        topic,prompt=prompt_for(db,session);entry=material_entry(session)
+        result['question']={'topic_id':topic.id,'topic':topic.name,'prompt':prompt,'style':entry['style'] if entry else prompt_for_turn(session.id,session.student_id,session.course_id,session.cursor,topic.name)[0]}
+        if entry:
+            result['question']['source_locations']=[{'filename':s['filename'],'location':s['location']} for s in entry['sources']]
+            result['question']['provider']=entry['provider']
+            result['question']['language']=entry['language']
+    result['material_based']=bool(session.topic_ids and isinstance(session.topic_ids[0],dict))
+    if result['material_based'] and any(isinstance(item,dict) and item.get('style')=='Revision practice' for item in session.topic_ids):
+        result['coverage_notice']='Offline practice includes revision of the selected concepts. For more varied AI-generated questions, use a configured live AI provider or select a wider slide range.'
+    elif result['material_based'] and session.topic_ids[0].get('requested_count',result['total'])>result['total']:
+        result['coverage_notice']='This earlier session contains fewer questions than requested. Start a new practice session for the updated format.'
     return result
 @router.post('/courses/{cid}/viva/start')
-def start(cid:int,data:VivaStart,user=Depends(current_user),db=Depends(get_db)):
+async def start(cid:int,data:VivaStart,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');course_access(db,user,cid)
     topics=db.scalars(select(Topic).where(Topic.course_id==cid)).all()
-    if data.topic_id:
-        topics=[t for t in topics if t.id==data.topic_id]
+    from app.models import Resource,Chunk
+    ready=db.scalar(select(Chunk.id).join(Resource,Resource.id==Chunk.resource_id).where(Resource.course_id==cid,Resource.owner_id.is_(None),Resource.status=='ready').limit(1))
+    use_material=bool(data.material_based or data.resource_ids or data.page_from or data.page_to or data.heading or (not data.topic_id and (ready is not None or not topics)))
+    if use_material:
+        from app.services.materials import MaterialScope,resolve
+        scope=MaterialScope(resource_ids=data.resource_ids,page_from=data.page_from,page_to=data.page_to,heading=data.heading)
+        evidence=resolve(db,cid,scope,limit=None)
+        # Throttle generation independently of the existing per-answer limit.
+        throttle(db,'material-practice:'+str(user.id),10)
+        try:questions=await material_questions(evidence,data.count,data.language,data.difficulty)
+        except ValueError as exc:raise HTTPException(422,str(exc))
+        # Serialize automatic concept creation for a course; never hold a write
+        # lock while the AI provider is running.
+        db.execute(select(Course.id).where(Course.id==cid).with_for_update()).scalar_one()
+        topics=list(db.scalars(select(Topic).where(Topic.course_id==cid)))
+        topic_ids=[]
+        for question in questions:
+            topic=source_topic(db,cid,question['sources'][0],topics)
+            topic_ids.append({**question,'topic_id':topic.id,'requested_count':data.count})
     else:
-        order=[x['id'] for x in snapshot(db,user.id,cid)['path']]
-        topics.sort(key=lambda t:order.index(t.id) if t.id in order else len(order))
-    if not topics:raise HTTPException(409,'Add course concepts before starting viva practice.')
-    topic_ids=[topics[i % len(topics)].id for i in range(data.count)]
+        if data.topic_id:
+            topics=[t for t in topics if t.id==data.topic_id]
+        else:
+            order=[x['id'] for x in snapshot(db,user.id,cid)['path']]
+            topics.sort(key=lambda t:order.index(t.id) if t.id in order else len(order))
+        if not topics:raise HTTPException(409,'No concepts match this selection. Choose teacher material for practice.')
+        topic_ids=[topics[i % len(topics)].id for i in range(data.count)]
     session=VivaSession(student_id=user.id,course_id=cid,topic_ids=topic_ids,cursor=0,expires=now()+timedelta(hours=1))
     db.add(session);db.commit();return payload(db,session)
 @router.get('/viva/{vid}')
@@ -50,17 +89,27 @@ async def answer_viva(vid:int,data:VivaAnswer,user=Depends(current_user),db=Depe
     if session.expires<now() or session.cursor>=len(session.topic_ids):raise HTTPException(409,'Viva is complete or expired.')
     if data.turn_index!=session.cursor:raise HTTPException(409,'This turn is already submitted or not currently issued.')
     topic,prompt=prompt_for(db,session);index=session.cursor
-    evaluation=offline_evaluation(topic.name,topic.description,data.text);score=None;provider='TEACHER REVIEW'
+    entry=material_entry(session)
+    reference='\n\n'.join(f"{s['filename']} · {s['location']}\n{s['text']}" for s in entry['sources']) if entry else topic.description
+    evaluation=offline_evaluation(topic.name,reference,data.text);score=None;provider='PRACTICE OFFLINE' if entry else 'TEACHER REVIEW'
+    if entry:
+        evaluation['feedback']='Compare your response with the exact course excerpts below. No live AI score is available.'
+        evaluation['follow_up']=''
     if not DEMO_MODE and os.getenv('LLM_API_KEY'):
         try:
-            result=await evaluate(prompt,data.text,topic.name,topic.description);evaluation=result.model_dump();score=result.score;provider='AI PROVISIONAL'
+            result=await evaluate_material(prompt,data.text,topic.name,entry['sources'],entry['language']) if entry else await evaluate(prompt,data.text,topic.name,reference)
+            evaluation=result.model_dump();score=result.score;provider='AI PRACTICE' if entry else 'AI PROVISIONAL'
         except Exception:
-            provider='PROVIDER FALLBACK';evaluation['feedback']='The AI evaluator is unavailable. Your transcript is saved for teacher review; no AI grade was invented.'
+            provider='PRACTICE FALLBACK' if entry else 'PROVIDER FALLBACK'
+            evaluation['feedback']='The AI evaluator is unavailable. Compare your answer with the source below; no AI score was invented.' if entry else 'The AI evaluator is unavailable. Your transcript is saved for teacher review; no AI grade was invented.'
+    if entry:
+        evaluation['reference']=reference
+        evaluation['sources']=[{'id':s['id'],'filename':s['filename'],'location':s['location'],'text':s['text']} for s in entry['sources']]
     claimed=db.execute(update(VivaSession).where(VivaSession.id==vid,VivaSession.cursor==index).values(cursor=index+1))
     if claimed.rowcount!=1:db.rollback();raise HTTPException(409,'This turn was already saved in another request.')
     turn=VivaTurn(session_id=vid,turn_index=index,topic_id=topic.id,prompt=prompt,answer=data.text,evaluation=evaluation,provider=provider,proposed_score=score)
     db.add(turn);db.commit();db.refresh(session)
-    return {'evaluation':evaluation,'proposed_score':score,'status':provider,'message':'Only teacher-reviewed viva scores affect mastery.','next':payload(db,session)}
+    return {'evaluation':evaluation,'proposed_score':score,'status':provider,'message':'Personal material practice is formative; it does not affect official marks or require teacher review.' if entry else 'Only teacher-reviewed viva scores affect mastery.','next':payload(db,session)}
 @router.get('/courses/{cid}/viva/history')
 def viva_history(cid:int,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');course_access(db,user,cid)
@@ -68,7 +117,7 @@ def viva_history(cid:int,user=Depends(current_user),db=Depends(get_db)):
 @router.get('/courses/{cid}/viva/review')
 def review_queue(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)
-    rows=db.execute(select(VivaTurn,VivaSession,User).join(VivaSession,VivaSession.id==VivaTurn.session_id).join(User,User.id==VivaSession.student_id).where(VivaSession.course_id==cid).order_by(VivaTurn.created.desc()).limit(100)).all()
+    rows=db.execute(select(VivaTurn,VivaSession,User).join(VivaSession,VivaSession.id==VivaTurn.session_id).join(User,User.id==VivaSession.student_id).where(VivaSession.course_id==cid,~VivaTurn.provider.in_(['AI PRACTICE','PRACTICE OFFLINE','PRACTICE FALLBACK'])).order_by(VivaTurn.created.desc()).limit(100)).all()
     audit(db,user,'viva records viewed',cid);db.commit()
     return [{'id':t.id,'student_id':u.id,'name':u.name,'university_id':u.university_id,'topic':db.get(Topic,t.topic_id).name,'reference':db.get(Topic,t.topic_id).description,'prompt':t.prompt,'answer':t.answer,'evaluation':t.evaluation,'proposed_score':t.proposed_score,'reviewed_score':t.reviewed_score,'teacher_feedback':t.teacher_feedback,'provider':t.provider} for t,s,u in rows]
 @router.post('/viva/turns/{tid}/review')
@@ -76,6 +125,7 @@ def review(tid:int,data:VivaReview,user=Depends(current_user),db=Depends(get_db)
     turn=db.get(VivaTurn,tid);session=db.get(VivaSession,turn.session_id) if turn else None
     if not session:raise HTTPException(404,'Viva response not found.')
     course_access(db,user,session.course_id,True)
+    if material_entry(session,turn.turn_index):raise HTTPException(409,'Personal material practice does not require teacher grading.')
     claimed=db.execute(update(VivaTurn).where(VivaTurn.id==tid,VivaTurn.reviewed_at.is_(None)).values(reviewed_score=data.score,teacher_feedback=data.feedback,reviewed_by=user.id,reviewed_at=now()))
     if claimed.rowcount!=1:db.rollback();raise HTTPException(409,'This viva response has already been reviewed.')
     state=db.scalar(select(Mastery).where(Mastery.student_id==session.student_id,Mastery.topic_id==turn.topic_id))

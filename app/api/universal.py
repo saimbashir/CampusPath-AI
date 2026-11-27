@@ -15,8 +15,14 @@ def policy(cid:int,data:Policy,user=Depends(current_user),db=Depends(get_db)):
 @router.get('/{cid}/material-catalog')
 def catalog(cid:int,user=Depends(current_user),db=Depends(get_db)):
     c=course_access(db,user,cid)
-    rows=db.execute(select(Chunk,Resource).join(Resource,Resource.id==Chunk.resource_id).where(Resource.course_id==cid,Resource.owner_id.is_(None))).all()
-    return {'material_only':c.material_only,'resources':[{'id':r.id,'filename':r.filename,'chunks':[{'id':ch.id,'location':ch.location,'structure':ch.structure or {}} for ch,rr in rows if rr.id==r.id]} for r in {r.id:r for ch,r in rows}.values()],
+    from app.services.materials import source_metadata
+    resources=list(db.scalars(select(Resource).where(Resource.course_id==cid,Resource.owner_id.is_(None)).order_by(Resource.id)))
+    groups={r.id:[] for r in resources}
+    rows=db.execute(select(Chunk,Resource).join(Resource,Resource.id==Chunk.resource_id).where(Resource.course_id==cid,Resource.owner_id.is_(None),Resource.status=='ready').order_by(Resource.id,Chunk.id)).all()
+    for ch,r in rows:
+        groups[r.id].append({'id':ch.id,'location':ch.location,'structure':source_metadata(ch.location,ch.text,ch.structure)})
+    return {'material_only':c.material_only,'resources':[{'id':r.id,'filename':r.filename,'status':r.status,'chunks':groups[r.id]} for r in resources if groups[r.id]],
+            'unready_resources':[{'id':r.id,'filename':r.filename,'status':r.status,'status_detail':r.status_detail} for r in resources if not groups[r.id]],
             'topics':[{'id':t.id,'name':t.name,'clo':t.clo,'structure':t.structure or {}} for t in db.scalars(select(Topic).where(Topic.course_id==cid))]}
 @router.post('/{cid}/material-query')
 def query(cid:int,data:MaterialScope,user=Depends(current_user),db=Depends(get_db)):

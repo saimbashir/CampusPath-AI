@@ -8,6 +8,8 @@ from app.models import User,Enrollment,Course,Topic,Assignment,Submission,Note,A
 from app.schemas import AssignmentInput,TextInput,GradeInput,SubmissionInput
 from app.auth.security import current_user,role,course_access,student_access,audit
 from app.services.learning import snapshot
+from app.ai.assignment_review import unpack_feedback,pack_feedback,pending
+from app.auth.security import throttle
 router=APIRouter(prefix='/api')
 @router.get('/courses/{cid}/students')
 def students(cid:int,q:str='',user=Depends(current_user),db=Depends(get_db)):
@@ -65,20 +67,29 @@ def assignments(cid:int,user=Depends(current_user),db=Depends(get_db)):
         query=select(Submission).where(Submission.assignment_id==a.id)
         if user.role=='student':query=query.where(Submission.student_id==user.id)
         submissions=db.scalars(query).all()
-        result.append({'id':a.id,'title':a.title,'instructions':a.instructions,'rubric':a.rubric,'source_ids':a.source_ids or [],'due':a.due,'submissions':[{'id':s.id,'student_id':s.student_id,'name':db.get(User,s.student_id).name,'university_id':db.get(User,s.student_id).university_id,'text':s.text,'grade':s.grade,'feedback':s.feedback,'resource_id':s.resource_id,'attachment_filename':db.get(Resource,s.resource_id).filename if s.resource_id else None} for s in submissions]})
+        result.append({'id':a.id,'title':a.title,'instructions':a.instructions,'rubric':a.rubric,'source_ids':a.source_ids or [],'due':a.due,'submissions':[{'id':s.id,'student_id':s.student_id,'name':db.get(User,s.student_id).name,'university_id':db.get(User,s.student_id).university_id,'text':s.text,'grade':s.grade if user.role=='teacher' else None,'feedback':unpack_feedback(s.feedback)[1] if user.role=='teacher' else '', 'submitted':True,'graded':s.grade is not None, 'proposal':unpack_feedback(s.feedback)[0] if user.role=='teacher' else None,'resource_id':s.resource_id,'attachment_filename':db.get(Resource,s.resource_id).filename if s.resource_id else None} for s in submissions]})
     return result
 @router.post('/courses/{cid}/assignments',status_code=201)
 def assignment(cid:int,data:AssignmentInput,user=Depends(current_user),db=Depends(get_db)):
     course=course_access(db,user,cid,True)
-    if course.material_only and not data.source_ids:raise HTTPException(422,'Link assignment instructions to teacher source chunks in material-only mode.')
+    if data.scope is not None and not data.source_ids:
+        from app.services.materials import MaterialScope,resolve
+        try:scope=MaterialScope.model_validate(data.scope)
+        except ValueError as exc:raise HTTPException(422,'Invalid assignment material selection.') from exc
+        context=resolve(db,cid,scope)
+        data.source_ids=[s['id'] for s in context]
+    if course.material_only and not data.source_ids:raise HTTPException(422,'Choose teacher material for this assignment under the current source policy.')
     if data.source_ids:
         from app.services.materials import resolve,MaterialScope
         resolve(db,cid,MaterialScope(chunk_ids=data.source_ids))
     from app.services.planning import utc_naive
-    values=data.model_dump();values['due']=utc_naive(values['due'])
-    a=Assignment(course_id=cid,**values);db.add(a);db.commit();return {'id':a.id}
+    values=data.model_dump(exclude={'scope'});values['due']=utc_naive(values['due'])
+    a=Assignment(course_id=cid,**values);db.add(a);db.flush()
+    from app.services.notifications import notify_assignment
+    notify_assignment(db,a)
+    db.commit();return {'id':a.id}
 @router.post('/assignments/{aid}/submit')
-def submit(aid:int,data:SubmissionInput,user=Depends(current_user),db=Depends(get_db)):
+async def submit(aid:int,data:SubmissionInput,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');a=db.get(Assignment,aid)
     if not a:raise HTTPException(404,'Assignment not found.')
     course=course_access(db,user,a.course_id)
@@ -90,19 +101,74 @@ def submit(aid:int,data:SubmissionInput,user=Depends(current_user),db=Depends(ge
     s=db.scalar(select(Submission).where(Submission.assignment_id==aid,Submission.student_id==user.id))
     if s and s.grade is not None:raise HTTPException(409,'Graded work cannot be overwritten.')
     if not s:
-        s=Submission(assignment_id=aid,student_id=user.id,text=data.text,resource_id=data.resource_id);db.add(s)
+        s=Submission(assignment_id=aid,student_id=user.id,text=data.text,resource_id=data.resource_id,feedback=pack_feedback(pending('Submission received; awaiting evaluation.')));db.add(s);db.flush()
     else:
-        changed=db.execute(update(Submission).where(Submission.id==s.id,Submission.grade.is_(None)).values(text=data.text,created=now(),resource_id=data.resource_id))
+        changed=db.execute(update(Submission).where(Submission.id==s.id,Submission.grade.is_(None)).values(text=data.text,created=now(),resource_id=data.resource_id,feedback=pack_feedback(pending('Updated submission; awaiting evaluation.'))))
         if changed.rowcount!=1:db.rollback();raise HTTPException(409,'Your teacher has graded this work. Refresh to view feedback.')
-    db.commit();return {'ok':True}
+    db.commit();db.refresh(s)
+    # The submission is durable before any provider request. Do not return private scores.
+    from app.services.notifications import notify
+    from app.models import TeacherAssignment
+    teachers={course.teacher_id}|set(db.scalars(select(TeacherAssignment.teacher_id).where(TeacherAssignment.course_id==a.course_id)))
+    for uid in teachers:notify(db,uid,a.course_id,f'assignment-review:{s.id}:{s.created.isoformat()}','Assignment ready for review',a.title+' has a submitted response.','assignments')
+    db.commit()
+    from app.ai import grounded
+    if grounded.enabled():
+        try:throttle(db,'assignment-submit-review:'+str(user.id),15)
+        except HTTPException:return {'ok':True,'message':'Submission saved for teacher review.'}
+    await evaluate_submission(db,a,s)
+    return {'ok':True,'message':'Submission saved for teacher review.'}
+
+async def evaluate_submission(db,a,s):
+    from app.ai.assignment_review import propose
+    from app.services.materials import MaterialScope,resolve,spread
+    from app.models import Chunk
+    # Snapshot submitted version. Compare after the network request so stale feedback cannot overwrite newer work.
+    sid,version,initial_feedback=s.id,s.created,s.feedback
+    student_answer=s.text or ''
+    missing_attachment=False
+    if s.resource_id:
+        resource=db.get(Resource,s.resource_id)
+        if not resource or resource.owner_id!=s.student_id or resource.course_id!=a.course_id or resource.status!='ready':missing_attachment=True
+        else:
+            excerpts=list(db.scalars(select(Chunk.text).where(Chunk.resource_id==resource.id).order_by(Chunk.id)))
+            if not excerpts:missing_attachment=True
+            else:student_answer+='\n\nAttached answer:\n'+'\n'.join(excerpts)
+    assignment={'instructions':a.instructions,'rubric':a.rubric}
+    evidence=[]
+    try:evidence=resolve(db,a.course_id,MaterialScope(chunk_ids=a.source_ids or []),limit=None)
+    except HTTPException:pass
+    # Do not silently truncate student work or selected source evidence for grading.
+    db.commit()
+    if missing_attachment:proposal=pending('The attached answer is not readable yet. Retry evaluation after indexing or review the original manually.')
+    elif len(student_answer)>18000 or len(evidence)>24:proposal=pending('The response or source scope is too large for a reliable automatic review. Teacher review is required.')
+    else:
+        try:proposal=await propose(assignment,student_answer,evidence)
+        except Exception:proposal=pending('AI evaluation failed or returned invalid evidence. No mark was invented; review manually or retry.')
+    claim=db.execute(update(Submission).where(Submission.id==sid,Submission.created==version,Submission.grade.is_(None),Submission.feedback==initial_feedback).values(feedback=pack_feedback(proposal)))
+    db.commit()
+    return proposal if claim.rowcount==1 else None
+
+@router.post('/submissions/{sid}/evaluate')
+async def retry_evaluation(sid:int,user=Depends(current_user),db=Depends(get_db)):
+    s=db.get(Submission,sid)
+    if not s:raise HTTPException(404,'Submission not found.')
+    a=db.get(Assignment,s.assignment_id);course_access(db,user,a.course_id,True)
+    if s.grade is not None:raise HTTPException(409,'This work already has a teacher-confirmed grade.')
+    throttle(db,'assignment-evaluation:'+str(user.id),15)
+    result=await evaluate_submission(db,a,s)
+    if result is None:raise HTTPException(409,'The submission changed during evaluation. Refresh the page.')
+    return {'proposal':result}
+
 @router.post('/submissions/{sid}/grade')
 def grade(sid:int,data:GradeInput,user=Depends(current_user),db=Depends(get_db)):
     s=db.get(Submission,sid)
     if not s:raise HTTPException(404,'Submission not found.')
     a=db.get(Assignment,s.assignment_id);course_access(db,user,a.course_id,True)
-    s.grade=data.grade;s.feedback=data.feedback;audit(db,user,'marks changed',sid)
+    if data.grade<100 and len(data.feedback.strip())<3:raise HTTPException(422,'Explain why marks were deducted before confirming this grade.')
+    s.grade=data.grade;s.feedback=pack_feedback(unpack_feedback(s.feedback)[0],data.feedback);audit(db,user,'marks changed',sid)
     from app.services.notifications import notify
-    notify(db,s.student_id,a.course_id,f'grade:{sid}:{data.grade}','Assignment graded',a.title+' has teacher feedback.','assignments')
+    notify(db,s.student_id,a.course_id,f'grade:{sid}:{data.grade}','Assignment graded',a.title+' has been reviewed. Contact your teacher for feedback.','assignments')
     db.commit();return {'ok':True}
 @router.get('/courses/{cid}/report.csv')
 def report(cid:int,user=Depends(current_user),db=Depends(get_db)):

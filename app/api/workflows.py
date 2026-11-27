@@ -31,8 +31,8 @@ def notifications(user=Depends(current_user),db=Depends(get_db)):
     if user.role!='admin':
         accessible=teacher_courses(user) if user.role=='teacher' else select(Enrollment.course_id).where(Enrollment.student_id==user.id)
         query=query.where(Notification.course_id.is_(None)|Notification.course_id.in_(accessible))
-    rows=db.scalars(query.order_by(Notification.created.desc()).limit(100)).all()
-    return [{'id':n.id,'course_id':n.course_id,'title':n.title,'message':n.message,'target':n.target,'read':n.read,'created':n.created} for n in rows]
+    rows=db.scalars(query.order_by(Notification.read.asc(),Notification.created.desc(),Notification.id.desc()).limit(100)).all()
+    return [{'id':n.id,'course_id':n.course_id,'title':n.title,'message':('Your assigned assessment has been reviewed. Contact your teacher for feedback.' if user.role=='student' and n.event_key.startswith(('oral-final:','grade:')) else n.message),'target':n.target,'read':n.read,'created':n.created} for n in rows]
 @router.post('/notifications/{nid}/read')
 def read_notification(nid:int,user=Depends(current_user),db=Depends(get_db)):
     n=db.get(Notification,nid)

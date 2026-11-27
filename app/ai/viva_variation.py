@@ -57,3 +57,94 @@ def prompt_for_turn(session_id: int, student_id: int, course_id: int, turn: int,
     # Full cycles (only 30 allowed currently) are deliberately distinct.
     variant = (rng.randrange(len(versions)) + turn // len(order)) % len(versions)
     return name, versions[variant].format(topic=topic_name)
+
+
+
+# Offline exam-style recall: name a supported concept, not the source paragraph.
+# Repeated concepts are deliberately labelled as revision, never as fresh AI facts.
+import re
+
+_VERB = re.compile(r'\b(?:is|are|was|were|means|refers to|uses?|includes?|consists? of|contains?|provides?|requires?|works?|allows?|helps?|stores?|explores?|reduces?|increases?|represents?|determines?|defines?|halves?|builds?|arranges?|repeatedly)\b', re.I)
+
+def _short_name(value):
+    value = re.sub(r'^\s*(?:[-•–#]+|\d+[.)])\s*', '', str(value or '')).strip(' :–—-')
+    value = re.sub(r'\s+', ' ', value)
+    if not value or len(value)>90 or len(value.split())>11 or re.search(r'[.!?;]|\b(?:pdf|pptx|docx)\b',value,re.I): return ''
+    if _VERB.search(value): return ''
+    if value.casefold() in {'introduction','overview','contents','summary','objectives','conclusion','agenda','references','example','examples'}: return ''
+    if re.fullmatch(r'(?:slide|page|chapter|lecture|unit)\s*\d+',value,re.I): return ''
+    return value
+
+def material_concept(source):
+    text=source['text']; meta=source.get('structure') or {}
+    # A PPT title or short first line is normally the most reliable concept name.
+    first=next((line.strip() for line in text.splitlines() if line.strip()),'')
+    first=re.split(r'\s*[•●▪]\s*',first,maxsplit=1)[0]
+    for candidate in (meta.get('heading'),first,meta.get('section_title'),meta.get('chapter_title')):
+        name=_short_name(candidate)
+        if name:return name
+    # Plain prose: use the explicit subject of a definition or factual statement.
+    for line in re.split(r'\n+|(?<=[.!?])\s+',text):
+        match=_VERB.search(line)
+        if match:
+            name=_short_name(line[:match.start()])
+            if name and not re.match(r'^(?:this|these|they|it|we|there|you|he|she|each|a|an)\b',name,re.I):return name
+    return ''
+
+# These ask for recall of what is present; they do not assume unstated examples,
+# applications, prerequisites, formulas, benefits, comparisons or limitations.
+_RECALL=(
+    ('Definition','Explain {topic}.','{topic} ko samjhayen.'),
+    ('Main idea','What is the main idea of {topic}?','{topic} ka bunyadi khayal kya hai?'),
+    ('Key points','State the key points of {topic}.','{topic} ke aham points bayan karein.'),
+    ('Understanding','Describe {topic} in your own words.','{topic} ko apne alfaaz mein bayan karein.'),
+    ('Revision','Give a concise explanation of {topic}.','{topic} ki mukhtasar wazahat karein.'),
+    ('Teach-back','How would you explain {topic} to a beginner?','{topic} kisi beginner ko kaise samjhayen ge?'),
+    ('Recall','What should you remember about {topic}?','{topic} ke bare mein kya yaad rakhna chahiye?'),
+    ('Oral summary','Summarize your understanding of {topic}.','{topic} ki apni samajh ka khulasa karein.'),
+    ('Precise recall','State the central point about {topic}.','{topic} ka markazi nuqta bayan karein.'),
+    ('Revision check','What do you understand by {topic}?','{topic} se aap kya samajhte hain?'),
+)
+
+def material_candidates(source,language='English'):
+    topic=material_concept(source)
+    if not topic:return []
+    text=source['text']; body=text.casefold(); roman=language=='Roman Urdu'
+    items=[]
+    def add(style,en,ru):items.append((style,(ru if roman else en).format(topic=topic)))
+    # Ask only for relations that actually appear in the selected text.
+    if re.search(r'\b(?:uses?|using|utilizes?|relies on|based on)\b',body):
+        add('Understanding','What information or resources are used in {topic}?','{topic} mein kaun si information ya resources use hote hain?')
+    if re.search(r'\b(?:includes?|consists? of|types of|kinds of|components of|strategies)\b',body) and re.search(r'[•●▪]|\n\s*[-–]|\([^)]{1,12}\).*[–-]',text,re.S):
+        add('Recall','Which types or components of {topic} are listed?','{topic} ki kaun si types ya components diye gaye hain?')
+    if re.search(r'\b(?:steps?|procedure|algorithm works|process involves|repeatedly|first.*then)\b',body):
+        add('Process','Describe how {topic} works.','{topic} kaam kaise karta hai?')
+    if re.search(r'\b(?:advantages?|benefits?|strengths?)\b',body):
+        add('Advantages','What benefits of {topic} are described?','{topic} ke kaun se faide bayan kiye gaye hain?')
+    if re.search(r'\b(?:limitations?|drawbacks?|disadvantages?|constraints?)\b',body):
+        add('Limitations','What limitations of {topic} are described?','{topic} ki kaun si limitations bayan ki gayi hain?')
+    if re.search(r'\b(?:examples?|for instance|such as)\b',body):
+        add('Example','Give an example of {topic} covered in the material.','Material mein diya gaya {topic} ka example batayen.')
+    if re.search(r'\b(?:requires?|must|necessary|condition)\b',body):
+        add('Requirements','What requirements for {topic} are stated?','{topic} ke liye kaun si requirements di gayi hain?')
+    # Explicit abbreviation expansions are independent, source-answerable facts.
+    # For example a slide listing 'Breadth-first search (BFS)' supports asking
+    # what BFS stands for, but not its unstated implementation details.
+    for match in re.finditer(r'\b([A-Z][A-Za-z0-9]*(?:[ -][A-Za-z][A-Za-z0-9]*){0,7})\s*\(([A-Z][A-Z0-9]{1,9})\)',text):
+        phrase,acronym=match.groups()
+        words=re.findall(r'[A-Za-z0-9]+',phrase)
+        initials=''.join(word[0] for word in words).upper()
+        if not initials.endswith(acronym):continue
+        question=(f'{acronym} ka full form kya hai?' if roman else f'What does {acronym} stand for?')
+        if question not in [q for _,q in items]:items.append(('Terminology',question))
+    if re.search(r'\b(?:systematically|unguided|automatically|sequentially|recursively|iteratively|step by step)\b',body):
+        add('Process','Describe the process of {topic}.','{topic} kis tarah perform hota hai?')
+    # Definition comes first; other recall phrasings fill limited-source revision.
+    recall=[(style,(ru if roman else en).format(topic=topic)) for style,en,ru in _RECALL]
+    return [recall[0],*items,*recall[1:]]
+
+
+def material_prompt(source,index,language='English'):
+    candidates=material_candidates(source,language)
+    if not candidates:raise ValueError('No named concept could be extracted from this source.')
+    return candidates[index%len(candidates)][1]

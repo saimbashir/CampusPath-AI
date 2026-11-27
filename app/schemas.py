@@ -65,8 +65,19 @@ class TutorInput(Input):
     chapters:list[str]=Field(default_factory=list,max_length=100)
     page_from:int|None=Field(default=None,ge=1)
     page_to:int|None=Field(default=None,ge=1)
+    heading:str=Field(default='',max_length=200)
+    teacher_only:bool=False
     mode: Literal['Simple English','Detailed','Roman Urdu','Step-by-step','Analogy','Worked Example','Code Example','Exam Focus','Socratic Mode'] = 'Simple English'
 class StartQuiz(Input):
+    material_based:bool=False
+    resource_ids:list[int]=Field(default_factory=list,max_length=100)
+    page_from:int|None=Field(default=None,ge=1)
+    page_to:int|None=Field(default=None,ge=1)
+    heading:str=Field(default='',max_length=200)
+    @model_validator(mode='after')
+    def valid_range(self):
+        if self.page_from and self.page_to and self.page_from>self.page_to:raise ValueError('Start page/slide must not exceed end.')
+        return self
     mode: Literal['adaptive','diagnostic','mock'] = 'adaptive'
     topic_id: int | None = None
     count: int = Field(default=8,ge=1,le=30)
@@ -84,6 +95,7 @@ class TextInput(Input):
 class CodeInput(Input):
     code: str = Field(min_length=3,max_length=80)
 class AssignmentInput(Input):
+    scope:dict|None=None
     source_ids:list[int]=Field(default_factory=list,max_length=30)
     title: str = Field(min_length=3,max_length=160)
     instructions: str = Field(min_length=3,max_length=8000)
@@ -129,6 +141,17 @@ class PasswordChange(Input):
 class VivaStart(Input):
     topic_id:int|None=None
     count:int=Field(default=30,ge=1,le=30)
+    material_based:bool=False
+    resource_ids:list[int]=Field(default_factory=list,max_length=100)
+    page_from:int|None=Field(default=None,ge=1)
+    page_to:int|None=Field(default=None,ge=1)
+    heading:str=Field(default='',max_length=200)
+    language:Literal['English','Roman Urdu']='English'
+    difficulty:Literal['Mixed','1','2','3']='Mixed'
+    @model_validator(mode='after')
+    def valid_range(self):
+        if self.page_from and self.page_to and self.page_from>self.page_to:raise ValueError('Start page/slide must not exceed end.')
+        return self
 class VivaAnswer(Input):
     turn_index:int=Field(ge=0)
     text:str=Field(min_length=2,max_length=6000)

@@ -10,6 +10,34 @@ def notify(db,uid,cid,key,title,message,target):
         with db.begin_nested():db.add(Notification(user_id=uid,course_id=cid,event_key=key,title=title,message=message,target=target))
     except IntegrityError:pass
 
+def notify_course(db,cid,key,title,message,target,student_ids=None):
+    recipients=select(Enrollment.student_id).where(Enrollment.course_id==cid)
+    if student_ids:recipients=recipients.where(Enrollment.student_id.in_(student_ids))
+    for uid in db.scalars(recipients).all():notify(db,uid,cid,key,title,message,target)
+
+def material_event(course_name,resource):
+    if resource.status=='processing':return f'material-uploaded:{resource.id}','New course material uploaded',f'{course_name}: {resource.filename} is uploaded and being indexed.'
+    if resource.status=='failed':return f'material-failed:{resource.id}','Course material indexing issue',f'{course_name}: {resource.filename} is available as a file; indexed text is unavailable.'
+    return f'material:{resource.id}','New course material',f'{course_name}: {resource.filename} is ready to read. Open Materials to access the file.'
+
+def notify_material(db,resource):
+    if resource.owner_id is not None or resource.kind!='COURSE MATERIAL':return
+    course=db.get(Course,resource.course_id)
+    if course:
+        key,title,message=material_event(course.name,resource)
+        notify_course(db,course.id,key,title,message,'materials')
+
+def notify_assignment(db,assignment):
+    course=db.get(Course,assignment.course_id)
+    due=assignment.due.strftime('%Y-%m-%d %H:%M UTC')
+    notify_course(db,course.id,f'assignment-new:{assignment.id}','New assignment',f'{course.name}: {assignment.title}. Due {due}.','assignments')
+
+def notify_published_viva(db,exam):
+    course=db.get(Course,exam.course_id);cfg=exam.config or {}
+    starts,ends=_utc(cfg.get('starts')),_utc(cfg.get('ends'))
+    window=(' Opens '+starts.strftime('%Y-%m-%d %H:%M UTC')+'.' if starts else '')+(' Due '+ends.strftime('%Y-%m-%d %H:%M UTC')+'.' if ends else '')
+    notify_course(db,course.id,f'viva-published:{exam.id}','New assigned viva',f'{course.name}: {exam.title}.{window}','formal-viva',cfg.get('student_ids'))
+
 def _utc(value):
     if not value:return None
     try:
@@ -30,8 +58,9 @@ def refresh_course_updates(db,user,cids):
             notify(db,user.id,cid,key,title,message,target)
             known.add(key)
     current=now()
-    for rid,cid,filename,course_name in db.execute(select(Resource.id,Resource.course_id,Resource.filename,Course.name).join(Course,Course.id==Resource.course_id).where(Resource.course_id.in_(cids),Resource.owner_id.is_(None),Resource.kind=='COURSE MATERIAL',Resource.status=='ready')):
-        add(cid,f'material:{rid}','New course material',f'{course_name}: {filename} is ready to read. Open Materials to access the file.','materials')
+    for resource,course_name in db.execute(select(Resource,Course.name).join(Course,Course.id==Resource.course_id).where(Resource.course_id.in_(cids),Resource.owner_id.is_(None),Resource.kind=='COURSE MATERIAL')):
+        key,title,message=material_event(course_name,resource)
+        add(resource.course_id,key,title,message,'materials')
     submitted=set(db.scalars(select(Submission.assignment_id).where(Submission.student_id==user.id)))
     for a,course_name,material_only in db.execute(select(Assignment,Course.name,Course.material_only).join(Course,Course.id==Assignment.course_id).where(Assignment.course_id.in_(cids),Assignment.due>=current)):
         if a.id in submitted or (material_only and not a.source_ids):continue
@@ -62,7 +91,7 @@ def refresh(db,user):
         for q in db.scalars(select(Question).where(Question.course_id.in_(teacher_courses(user)),Question.approved.is_(False))):
             notify(db,user.id,q.course_id,f'question:{q.id}','Question awaiting review',q.prompt[:180],'questions')
         from app.models import VivaSession,VivaTurn
-        for turn,session in db.execute(select(VivaTurn,VivaSession).join(VivaSession,VivaSession.id==VivaTurn.session_id).where(VivaSession.course_id.in_(teacher_courses(user)),VivaTurn.reviewed_at.is_(None))):
+        for turn,session in db.execute(select(VivaTurn,VivaSession).join(VivaSession,VivaSession.id==VivaTurn.session_id).where(VivaSession.course_id.in_(teacher_courses(user)),VivaTurn.reviewed_at.is_(None),~VivaTurn.provider.in_(['AI PRACTICE','PRACTICE OFFLINE','PRACTICE FALLBACK']))):
             notify(db,user.id,session.course_id,f'viva:{turn.id}','Viva response awaiting review','Review the transcript and rubric before confirming the score.','viva-review')
         from app.models import OralSession,VivaExam
         for session,exam in db.execute(select(OralSession,VivaExam).join(VivaExam,VivaExam.id==OralSession.viva_id).where(VivaExam.course_id.in_(teacher_courses(user)),OralSession.status=='TEACHER_REVIEW_REQUIRED')):

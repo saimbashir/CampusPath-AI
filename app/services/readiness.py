@@ -9,7 +9,7 @@ def calculate(db,student_id,course_id,probabilities,states,answers):
     coverage=sum(m.attempts>0 for m in states.values())/n if n else 0
     accuracy=sum(a.correct for a in answers)/len(answers) if answers else None
     recent_mocks=db.scalars(select(QuizRun).where(QuizRun.student_id==student_id,QuizRun.course_id==course_id,QuizRun.mode=='mock').order_by(QuizRun.created.desc())).all()
-    complete=[r for r in recent_mocks if r.finished or r.cursor>=len(r.question_ids) or r.expires<now()][:3]
+    complete=[r for r in recent_mocks if not (r.settings or {}).get('practice_questions') and (r.finished or r.cursor>=len(r.question_ids) or r.expires<now())][:3]
     mock_scores=[]
     for run in complete:
         correct=sum(db.scalars(select(Answer.correct).where(Answer.run_id==run.id)))

@@ -40,6 +40,8 @@ def _background(resource_id):
             try:
                 count=index_resource(db,resource,blob.data)
                 resource.status='ready';resource.status_detail=f'{count} source excerpts indexed.'
+                from app.services.notifications import notify_material
+                notify_material(db,resource)
                 db.commit()
                 semantic_index(db,resource_id)
             except Exception as exc:
@@ -47,6 +49,8 @@ def _background(resource_id):
                 resource=db.get(Resource,resource_id)
                 resource.status='failed'
                 resource.status_detail=(str(exc) if isinstance(exc,ValueError) else 'Could not read this document. Check its format and encryption.')[:300]
+                from app.services.notifications import notify_material
+                notify_material(db,resource)
                 db.commit()
                 log.warning('Background indexing failed for resource %s: %s',resource_id,type(exc).__name__)
 

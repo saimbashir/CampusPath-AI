@@ -18,29 +18,51 @@ from app.assessment.feedback import teaching_feedback
 @router.get('/courses/{cid}/students/{sid}/progress')
 def progress(cid:int,sid:int,user=Depends(current_user),db=Depends(get_db)):
     student_access(db,user,cid,sid)
-    result=snapshot(db,sid,cid);db.commit();return result
+    result=snapshot(db,sid,cid)
+    if user.role=='student':
+        from app.models import VivaSession,VivaTurn
+        scores=list(db.scalars(select(VivaTurn.reviewed_score).join(VivaSession,VivaSession.id==VivaTurn.session_id).where(VivaSession.student_id==sid,VivaSession.course_id==cid,VivaTurn.reviewed_score.is_not(None))))
+        result['viva_average']=round(sum(scores)/len(scores),1) if scores else None
+        result['viva_reviewed_count']=len(scores)
+    db.commit();return result
 @router.post('/courses/{cid}/tutor')
 async def tutor(cid:int,data:TutorInput,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid)
     from starlette.concurrency import run_in_threadpool
-    if data.resource_ids or data.chapters or data.page_from or data.page_to:
-        from app.services.materials import MaterialScope,resolve
-        chunks=resolve(db,cid,MaterialScope(resource_ids=data.resource_ids,chapters=data.chapters,page_from=data.page_from,page_to=data.page_to))[:8];retrieval_status='Explicit book/chapter/page scope'
-    else:
-        import re
-        chapter=re.search(r'chapter\s+(\d+)',data.question,re.I);page=re.search(r'page\s+(\d+)',data.question,re.I)
-        if chapter or page:
-            from app.services.materials import MaterialScope,resolve
-            chunks=resolve(db,cid,MaterialScope(chapters=[chapter[1]] if chapter else [],page_from=int(page[1]) if page else None,page_to=int(page[1]) if page else None))[:8];retrieval_status='Book location extracted from query'
-        else:chunks,retrieval_status=await run_in_threadpool(HybridStore().search,db,user,cid,data.question)
-    if not chunks:return {'answer':'The provided course material does not contain enough information to answer this confidently. Ask your teacher to upload notes for this topic, then ask again. New uploads are searched immediately; a missing match does not mean the entire document is unavailable.','sources':[],'mode':'No evidence','provider_status':'No retrieval result'}
+    from app.services.materials import MaterialScope,resolve
+    from app.ai.retrieval import focus_evidence
+    from app.models import Resource
+    import re
+    question=data.question
+    chapter=re.search(r'chapter\s+(\d+)',question,re.I)
+    position=re.search(r'(?:slides?|pages?)\s+(\d+)(?:\s*(?:[-–—]|to|through)\s*(?:(?:slides?|pages?)\s+)?(\d+))?',question,re.I)
+    overview=bool(re.search(r'\b(?:summari[sz]e|summary|overview|all slides|whole presentation|entire (?:presentation|course|lecture))\b',question,re.I))
+    explicit=bool(data.resource_ids or data.chapters or data.page_from or data.page_to or data.heading or chapter or position or overview)
+    try:
+        if explicit:
+            scope=MaterialScope(resource_ids=data.resource_ids,chapters=data.chapters or ([chapter[1]] if chapter else []),page_from=data.page_from or (int(position[1]) if position else None),page_to=data.page_to or (int(position[2] or position[1]) if position else None),heading=data.heading)
+            evidence=resolve(db,cid,scope,limit=None)
+            from app.services.materials import spread
+            chunks=spread(evidence,8) if overview else focus_evidence(evidence,question,k=8)
+            retrieval_status=f'Selected teacher material: {len(chunks)} of {len(evidence)} excerpts used'
+        else:
+            chunks,retrieval_status=await run_in_threadpool(HybridStore().search,db,user,cid,question,k=8,teacher_only=data.teacher_only)
+    except HTTPException as exc:
+        if exc.status_code!=409:raise
+        return {'answer':str(exc.detail),'sources':[],'mode':data.mode,'provider_status':'No retrieval result'}
+    except ValueError as exc:raise HTTPException(422,str(exc))
+    if not chunks:
+        ready=db.scalar(select(Resource.id).where(Resource.course_id==cid,Resource.owner_id.is_(None),Resource.status=='ready').limit(1))
+        message='The provided course material does not contain enough information to answer this confidently. '
+        message+=('The course has indexed material, but no matching excerpt was found. Try the document, heading or slide range.' if ready else 'Check the current file status in Materials. Uploaded files may still be indexing or need readable text.')
+        return {'answer':message,'sources':[],'mode':data.mode,'provider_status':'No retrieval result'}
     answer='';status='DEMO-SIMULATED' if DEMO_MODE else 'EXTRACTIVE FALLBACK'
     source_ids=[c['id'] for c in chunks]
     if not DEMO_MODE and os.getenv('LLM_API_KEY'):
         try:
             result=await CompatibleLLM().answer(data.question,chunks,data.mode)
             answer=result['answer'];source_ids=result['source_ids'];status='LIVE PROVIDER'
-            if db.get(Course,cid).material_only:
+            if data.teacher_only or db.get(Course,cid).material_only:
                 from app.ai.grounded import GroundingVerdict
                 from app.ai.providers import structured_generation
                 verdict=await structured_generation('Verify that every substantive claim in this tutor answer is supported by the provided sources. Reject external facts. Answer: '+answer,chunks,GroundingVerdict)
@@ -54,6 +76,10 @@ async def tutor(cid:int,data:TutorInput,user=Depends(current_user),db=Depends(ge
     profile=dict(user.profile or {});profile['mode']=data.mode;user.profile=profile;db.commit()
     return {'answer':answer,'sources':[c for c in chunks if c['id'] in source_ids],'provider_status':status,'retrieval_status':retrieval_status,'mode':data.mode}
 def quiz_payload(db,run):
+    if (run.settings or {}).get('practice_questions'):
+        from app.ai.practice_quiz import practice_payload
+        if run.expires<now() and not run.finished:run.finished=True;db.commit()
+        return practice_payload(run)
     if run.finished or run.cursor>=len(run.question_ids) or run.expires<now():
         if not run.finished:run.finished=True;db.commit()
         from app.assessment.results import results
@@ -61,8 +87,21 @@ def quiz_payload(db,run):
     q=db.get(Question,run.question_ids[run.cursor])
     return {'id':run.id,'complete':False,'index':run.cursor,'total':len(run.question_ids),'expires':run.expires,'mode':run.mode,'coverage_notice':('Only '+str(len(run.question_ids))+' approved questions are available. This is a short practice check, not sufficient evidence of mastery. Ask your teacher to expand the bank.' if len(run.question_ids)<(run.settings or {}).get('requested_count',len(run.question_ids)) else ''),'question':{'id':q.id,'prompt':q.prompt,'options':q.options,'topic_id':q.topic_id,'difficulty':q.difficulty,'bloom':q.bloom}}
 @router.post('/courses/{cid}/quiz',status_code=201)
-def start(cid:int,data:StartQuiz,user=Depends(current_user),db=Depends(get_db)):
+async def start(cid:int,data:StartQuiz,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');course_access(db,user,cid)
+    if data.material_based:
+        from app.services.materials import MaterialScope,resolve
+        from app.ai.practice_quiz import build_questions
+        from app.auth.security import throttle
+        if data.bloom_distribution or data.clo_distribution:raise HTTPException(422,'Bloom/CLO quotas are available only for the reviewed question bank.')
+        scope=MaterialScope(resource_ids=data.resource_ids,page_from=data.page_from,page_to=data.page_to,heading=data.heading,topic_ids=([data.topic_id] if data.topic_id else data.topic_ids))
+        evidence=resolve(db,cid,scope,limit=None)
+        throttle(db,'practice-quiz:'+str(user.id),15)
+        questions,provider=await build_questions(evidence,data.count,data.difficulty)
+        if not questions:raise HTTPException(409,'No reliable four-option questions could be created from this selection in the current provider mode. Try a broader range or Mixed/Easy difficulty.')
+        notice='' if len(questions)==data.count else f'Only {len(questions)} of {data.count} distinct source-supported questions could be prepared. Choose more material for a longer quiz.'
+        run=QuizRun(student_id=user.id,course_id=cid,mode=data.mode,question_ids=[-i for i in range(1,len(questions)+1)],cursor=0,difficulty=1,settings={'practice_questions':questions,'practice_answers':{},'practice_provider':provider,'coverage_notice':notice,'total_marks':data.total_marks,'requested_count':data.count},hint_ids=[],question_started=now(),expires=now()+timedelta(minutes=data.minutes))
+        db.add(run);db.commit();return quiz_payload(db,run)
     query=select(Question).where(Question.course_id==cid,Question.approved.is_(True))
     if data.topic_id:query=query.where(Question.topic_id==data.topic_id)
     if data.topic_ids:query=query.where(Question.topic_id.in_(data.topic_ids))
@@ -106,6 +145,15 @@ def answer(rid:int,data:AnswerInput,user=Depends(current_user),db=Depends(get_db
     if run.finished:raise HTTPException(409,'Assessment is already complete.')
     if run.expires<now():raise HTTPException(409,'Assessment time has expired. Start a new attempt.')
     if run.cursor>=len(run.question_ids) or data.question_id!=run.question_ids[run.cursor]:raise HTTPException(409,'This question was already answered or is not currently issued.')
+    if (run.settings or {}).get('practice_questions'):
+        cursor=run.cursor;settings=dict(run.settings);q=settings['practice_questions'][cursor]
+        if data.selected>=len(q['options']):raise HTTPException(422,'Invalid answer option.')
+        answers=dict(settings.get('practice_answers',{}));answers[str(cursor)]=data.selected;settings['practice_answers']=answers
+        claim=db.execute(update(QuizRun).where(QuizRun.id==rid,QuizRun.cursor==cursor,QuizRun.finished.is_(False),QuizRun.expires>now()).values(cursor=cursor+1,settings=settings,finished=cursor+1>=len(run.question_ids),question_started=now()))
+        if claim.rowcount!=1:db.rollback();raise HTTPException(409,'Answer already processed or session expired.')
+        db.commit();db.refresh(run)
+        if run.mode=='mock':return {'saved':True,'feedback_delayed':True,'next':quiz_payload(db,run)}
+        return {'correct':data.selected==q['correct'],'correct_answer':q['options'][q['correct']],'explanation':q['explanation'],'sources':q['sources'],'next':quiz_payload(db,run)}
     q=db.get(Question,data.question_id)
     if data.selected>=len(q.options):raise HTTPException(422,'Invalid answer option.')
     cursor=run.cursor
@@ -159,10 +207,12 @@ def hint(rid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,run.course_id)
     if run.mode=='mock':raise HTTPException(403,'Hints are unavailable during a mock exam.')
     if run.finished or run.expires<now() or run.cursor>=len(run.question_ids):raise HTTPException(409,'This assessment is no longer active.')
+    if (run.settings or {}).get('practice_questions'):
+        return {'hint':'Recall the concept and compare each option with the rule in your selected material.','message':'Personal practice hint; official mastery is unchanged.'}
     qid=run.question_ids[run.cursor];q=db.get(Question,qid)
     run.hint_ids=list(set((run.hint_ids or [])+[qid]));db.commit()
     return {'hint':db.get(Topic,q.topic_id).description,'message':'This is assisted practice; a correct answer will have reduced weight in the knowledge model.'}
 @router.get('/courses/{cid}/assessments')
 def history(cid:int,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');course_access(db,user,cid)
-    return [{'id':r.id,'mode':r.mode,'created':r.created,'expires':r.expires,'complete':r.finished or r.cursor>=len(r.question_ids) or r.expires<now(),'answered':r.cursor,'total':len(r.question_ids)} for r in db.scalars(select(QuizRun).where(QuizRun.student_id==user.id,QuizRun.course_id==cid).order_by(QuizRun.id.desc()).limit(30))]
+    return [{'id':r.id,'mode':r.mode,'created':r.created,'expires':r.expires,'complete':r.finished or r.cursor>=len(r.question_ids) or r.expires<now(),'answered':r.cursor,'total':len(r.question_ids),'material_based':bool((r.settings or {}).get('practice_questions'))} for r in db.scalars(select(QuizRun).where(QuizRun.student_id==user.id,QuizRun.course_id==cid).order_by(QuizRun.id.desc()).limit(30))]
