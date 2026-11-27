@@ -73,9 +73,11 @@ def upload(cid:int,file:UploadFile=File(...),user=Depends(current_user),db=Depen
     if len(data)>MAX_UPLOAD:raise HTTPException(413,f'File limit is {MAX_UPLOAD//(1024*1024)} MiB.')
     if not data:raise HTTPException(422,'The file is empty.')
     filename=Path((file.filename or 'upload.txt').replace('\\','/')).name[:200]
-    from app.services.indexing import index_resource,semantic_index,start_background
-    from app.documents.extract import TEXT_EXT
-    background=BACKGROUND_UPLOAD_BYTES and len(data)>BACKGROUND_UPLOAD_BYTES and Path(filename).suffix.lower() not in TEXT_EXT
+    from app.services.indexing import index_resource,semantic_index,start_background,failure_detail
+    from app.documents.extract import TEXT_EXT,OFFICE_CONVERT,SUPPORTED_EXT
+    suffix=Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_EXT:raise HTTPException(422,'Unsupported file type. Choose a supported document, image, audio, video or text file.')
+    background=suffix in OFFICE_CONVERT or (BACKGROUND_UPLOAD_BYTES and len(data)>BACKGROUND_UPLOAD_BYTES and suffix not in TEXT_EXT)
     r=Resource(course_id=cid,owner_id=user.id if user.role=='student' else None,filename=filename,kind='PERSONAL MATERIAL' if user.role=='student' else 'COURSE MATERIAL',status='processing' if background else 'ready')
     db.add(r);db.flush()
     db.add(ResourceBlob(resource_id=r.id,data=data,content_type='application/octet-stream'))
@@ -88,7 +90,9 @@ def upload(cid:int,file:UploadFile=File(...),user=Depends(current_user),db=Depen
     try:count=index_resource(db,r,data)
     except Exception as e:
         db.rollback()
-        message=str(e) if isinstance(e,ValueError) else 'Could not parse this document. Check its format and encryption.'
+        message=failure_detail(e)
+        import logging
+        logging.getLogger('campuspath.indexing').warning('Upload indexing failed: %s',type(e).__name__)
         raise HTTPException(422,message)
     r.status_detail=f'{count} source excerpts indexed.'
     from app.services.notifications import notify_material
@@ -96,13 +100,28 @@ def upload(cid:int,file:UploadFile=File(...),user=Depends(current_user),db=Depen
     audit(db,user,'resource indexed',r.id);db.commit()
     vector_status=semantic_index(db,r.id)
     return {'id':r.id,'chunks':count,'status':'ready','message':'Text indexed. Source locations retained.','vector_status':vector_status}
+@router.post('/courses/{cid}/resources/{rid}/retry',status_code=202)
+def retry_resource(cid:int,rid:int,user=Depends(current_user),db=Depends(get_db)):
+    course_access(db,user,cid)
+    from sqlalchemy import update
+    from app.services.indexing import start_background
+    r=db.get(Resource,rid)
+    if not r or r.course_id!=cid or (r.owner_id is None and user.role!='teacher') or (r.owner_id is not None and r.owner_id!=user.id):raise HTTPException(404,'Resource not found or access denied.')
+    if r.status!='failed':raise HTTPException(409,'Only failed uploads can be retried.')
+    if not db.scalar(select(ResourceBlob.resource_id).where(ResourceBlob.resource_id==rid)):raise HTTPException(409,'Original file unavailable. Upload the document again.')
+    if db.scalar(select(Chunk.id).where(Chunk.resource_id==rid).limit(1)):raise HTTPException(409,'This resource already has source excerpts. Upload a new version to preserve existing citations.')
+    claimed=db.execute(update(Resource).where(Resource.id==rid,Resource.status=='failed').values(status='processing',status_detail='Retry queued.'))
+    if claimed.rowcount!=1:db.rollback();raise HTTPException(409,'Indexing already queued.')
+    audit(db,user,'resource indexing retried',rid);db.commit();start_background(rid)
+    return {'id':rid,'status':'processing','message':'Indexing queued. Refresh Materials to check progress.'}
+
 @router.get('/courses/{cid}/resources/{rid}')
 def read_resource(cid:int,rid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid)
     r=db.get(Resource,rid)
     if not r or r.course_id!=cid or r.owner_id not in (None,user.id):raise HTTPException(404,'Resource not found.')
     from app.services.materials import source_metadata
-    return {'filename':r.filename,'chunks':[{'id':c.id,'location':c.location,'text':c.text,'structure':source_metadata(c.location,c.text,c.structure)} for c in db.scalars(select(Chunk).where(Chunk.resource_id==rid))]}
+    return {'filename':r.filename,'status':r.status,'status_detail':r.status_detail,'chunks':[{'id':c.id,'location':c.location,'text':c.text,'structure':source_metadata(c.location,c.text,c.structure)} for c in db.scalars(select(Chunk).where(Chunk.resource_id==rid))]}
 @router.get('/courses/{cid}/questions')
 def questions(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)

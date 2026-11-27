@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
-# Free OCR tools: tesseract reads images, pdftoppm (poppler) turns scanned PDF pages into images.
+# PDF fallback/OCR, legacy Office conversion, and video audio extraction.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng poppler-utils \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng poppler-utils libreoffice-writer libreoffice-impress libreoffice-calc fonts-dejavu-core ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.lock.txt .

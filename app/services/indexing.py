@@ -11,6 +11,15 @@ log=logging.getLogger('campuspath.indexing')
 _one_job=threading.BoundedSemaphore(1)
 
 
+def failure_detail(exc):
+    from app.documents.extract import DocumentError
+    from sqlalchemy.exc import SQLAlchemyError
+    if isinstance(exc,DocumentError):return str(exc)[:300]
+    if isinstance(exc,SQLAlchemyError):return 'The database could not save indexed text. Check server logs and retry indexing.'
+    if isinstance(exc,ValueError):return str(exc)[:300]
+    return f'Indexing failed ({type(exc).__name__}). Check server logs, then retry indexing.'
+
+
 def index_resource(db,resource,data):
     """Extract text and store chunks for one resource. Returns the number of excerpts."""
     from app.documents.extract import extract_sections
@@ -47,8 +56,9 @@ def _background(resource_id):
             except Exception as exc:
                 db.rollback()
                 resource=db.get(Resource,resource_id)
+                if resource is None:return
                 resource.status='failed'
-                resource.status_detail=(str(exc) if isinstance(exc,ValueError) else 'Could not read this document. Check its format and encryption.')[:300]
+                resource.status_detail=failure_detail(exc)
                 from app.services.notifications import notify_material
                 notify_material(db,resource)
                 db.commit()
