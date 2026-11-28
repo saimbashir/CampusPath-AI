@@ -38,6 +38,9 @@ class CourseInput(Input):
     description: str = Field(default='',max_length=4000)
     clos: list[str] = Field(default_factory=list,max_length=20)
 class TopicInput(Input):
+    source_ids:list[int]|None=Field(default=None,max_length=100)
+    chapter: str = Field(default='',max_length=140)
+    unit: str = Field(default='',max_length=140)
     name: str = Field(min_length=1,max_length=140)
     description: str = Field(default='',max_length=6000)
     prerequisites: list[int] = Field(default_factory=list,max_length=40)
@@ -71,6 +74,7 @@ class TutorInput(Input):
 class StartQuiz(Input):
     material_based:bool=False
     resource_ids:list[int]=Field(default_factory=list,max_length=100)
+    chapters:list[str]=Field(default_factory=list,max_length=100)
     page_from:int|None=Field(default=None,ge=1)
     page_to:int|None=Field(default=None,ge=1)
     heading:str=Field(default='',max_length=200)
@@ -143,6 +147,7 @@ class VivaStart(Input):
     count:int=Field(default=30,ge=1,le=30)
     material_based:bool=False
     resource_ids:list[int]=Field(default_factory=list,max_length=100)
+    chapters:list[str]=Field(default_factory=list,max_length=100)
     page_from:int|None=Field(default=None,ge=1)
     page_to:int|None=Field(default=None,ge=1)
     heading:str=Field(default='',max_length=200)

@@ -91,7 +91,7 @@ def test_mock_exact_joint_distribution_and_shortages(clients):
     body['bloom_distribution']={'Apply':100};assert s.post('/api/courses/1/quiz',json=body).status_code==409
     body['bloom_distribution']={'Apply':99};assert s.post('/api/courses/1/quiz',json=body).status_code==422
 
-def test_viva_saved_sequential_and_review_once(clients):
+def test_viva_saved_sequential_and_private_from_teacher(clients):
     s,t,other,outside,_=accounts(clients)
     before=good(s.get('/api/courses/1/students/2/progress'))['mastery']
     run=good(s.post('/api/courses/1/viva/start',json={'topic_id':7,'count':2}))
@@ -104,12 +104,13 @@ def test_viva_saved_sequential_and_review_once(clients):
     assert outside.get('/api/courses/1/viva/review').status_code==404
     assert s.get('/api/courses/1/viva/review').status_code==404
     tid=r['next']['turns'][0]['id'];grade={'score':85,'feedback':'Correct rule. Add an admissibility condition next time.'}
-    good(t.post(f'/api/viva/turns/{tid}/review',json=grade))
-    assert t.post(f'/api/viva/turns/{tid}/review',json=grade).status_code==409
-    p=good(s.get('/api/courses/1/students/2/progress'));assert p['viva_average']==85 and p['viva_reviewed_count']==1
+    assert good(t.get('/api/courses/1/viva/review'))==[]
+    assert t.post(f'/api/viva/turns/{tid}/review',json=grade).status_code==403
+    p=good(s.get('/api/courses/1/students/2/progress'));assert p['viva_average'] is None and p['viva_reviewed_count']==0
+    assert p['private_practice']['viva_answers']==1
     result=good(s.post(f"/api/viva/{run['id']}/answer",json={'turn_index':1,'text':'The heuristic should not overestimate remaining cost.'}))
     assert result['next']['complete']
-    history=good(s.get('/api/courses/1/viva/history'));assert history[0]['turns'][0]['reviewed_score']==85
+    history=good(s.get('/api/courses/1/viva/history'));assert history[0]['turns'][0]['reviewed_score'] is None
 
 def test_notifications_private_deduplicated_read(clients):
     s,t,other,_,_=accounts(clients)
@@ -231,7 +232,10 @@ def test_websocket_rejects_invalid_controls(clients,case):
 
 def test_readiness_six_factors_and_missing_evidence(clients):
     s,_=clients('saim@campuspath.demo')
-    p=good(s.get('/api/courses/1/students/2/progress'));detail=p['readiness_detail']
+    public=good(s.get('/api/courses/1/students/2/progress'));assert public['readiness'] is None and public['mastery'] is None
+    from app.services.learning import snapshot
+    with SessionLocal() as db:p=snapshot(db,2,1)
+    detail=p['readiness_detail']
     assert len(detail['factors'])==6 and sum(f['weight'] for f in detail['factors'])==pytest.approx(1)
     assert p['readiness']==round(sum(f['contribution'] for f in detail['factors']))
     assert next(f for f in detail['factors'] if f['key']=='mock')['value'] is None
@@ -239,7 +243,8 @@ def test_readiness_six_factors_and_missing_evidence(clients):
     r=good(s.post('/api/courses/1/quiz',json={'mode':'mock','count':1}),201)
     with SessionLocal() as db:q=db.get(Question,r['question']['id']);correct=q.correct
     good(s.post(f"/api/quiz/{r['id']}/answer",json={'question_id':q.id,'selected':correct}))
-    detail=good(s.get('/api/courses/1/students/2/progress'))['readiness_detail']
+    public=good(s.get('/api/courses/1/students/2/progress'));assert public['quiz_average']==100 and public['readiness'] is None
+    with SessionLocal() as db:detail=snapshot(db,2,1)['readiness_detail']
     assert next(f for f in detail['factors'] if f['key']=='mock')['value']==100
     assert next(f for f in detail['factors'] if f['key']=='recency')['value']>0
 

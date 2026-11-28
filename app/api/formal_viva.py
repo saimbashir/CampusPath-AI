@@ -6,6 +6,7 @@ from itertools import combinations
 from fastapi import APIRouter,Depends,HTTPException
 from pydantic import Field,model_validator
 from sqlalchemy import select,update
+from app.services.official_progress import visible_topic
 from app.db import get_db
 from app.models import VivaExam,VivaQuestion,OralSession,OralResponse,OralReview,Topic,User,Mastery,Revision,Enrollment,now
 from app.schemas import Input
@@ -151,7 +152,7 @@ def validate_topic(db,ex,q):
 async def generate(eid:int,user=Depends(current_user),db=Depends(get_db)):
     ex=exam_access(db,user,eid,True);mutable(ex);throttle(db,'formal-generation:'+str(user.id),15)
     if db.scalar(select(VivaQuestion.id).where(VivaQuestion.viva_id==eid)):raise HTTPException(409,'Delete draft questions before regenerating the full set, or add a manual question.')
-    context=evidence_for(db,ex);topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id))]
+    context=evidence_for(db,ex);topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id)) if visible_topic(t)]
     try:
         qs,provider=await grounded.questions(context,topics,ex.config)
         for q in qs:
@@ -186,7 +187,7 @@ async def generate_more(eid:int,data:GenerateMore,user=Depends(current_user),db=
     if existing and any(abs(q.marks-unit)>.001 for q in existing):
         raise HTTPException(409,'All bank questions must have the same marks for per-student selection.')
     context=evidence_for(db,ex)
-    topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id))]
+    topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id)) if visible_topic(t)]
     temp={**ex.config,'count':data.count,'total_marks':round(unit*data.count,2)}
     try:
         qs,provider=await grounded.questions(context,topics,temp,existing_prompts=[q.prompt for q in existing])
@@ -397,7 +398,7 @@ async def regenerate(eid:int,qid:int,user=Depends(current_user),db=Depends(get_d
     throttle(db,'formal-generation:'+str(user.id),15)
     evidence=evidence_for(db,ex)
     config={**ex.config,'count':1,'total_marks':q.marks,'bloom_distribution':{},'question_types':[q.content['question_type']]}
-    topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id))]
+    topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id)) if visible_topic(t)]
     try:
         generated,provider=await grounded.questions(evidence,topics,config);draft=generated[0];validate_topic(db,ex,draft);sources=validate_citations(draft.citations,evidence)
         if draft.question_type not in config['question_types'] or (config['difficulty']!='Mixed' and draft.difficulty!=int(config['difficulty'])):

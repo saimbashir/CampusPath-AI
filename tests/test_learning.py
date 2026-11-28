@@ -25,7 +25,7 @@ def test_algorithm_paths_and_costs():
 
 def test_complete_astar_journey(clients):
     c,u=clients('saim@campuspath.demo');base=f"/api/courses/1/students/{u['id']}/progress"
-    initial=c.get(base).json();assert next(t for t in initial['topics'] if t['name']=='A*')['mastery']==39
+    initial=c.get(base).json();assert next(t for t in initial['topics'] if t['name']=='A*')['mastery'] is None
     tutor=c.post('/api/courses/1/tutor',json={'question':'Explain A* in Roman Urdu according to Lecture 6','mode':'Roman Urdu'}).json()
     assert tutor['sources'] and all(s['filename']=='Lecture_6.pptx' for s in tutor['sources'])
     run=c.post('/api/courses/1/quiz',json={'topic_id':7,'count':3}).json()
@@ -42,6 +42,8 @@ def test_complete_astar_journey(clients):
     final=c.get(base).json()
     assert final['attempts']==3 and len(final['revisions'])==3 and len(final['misconceptions'])==1
     assert next(t for t in final['topics'] if t['id']==7)['attempts']==3
+    assert next(t for t in final['topics'] if t['id']==7)['mastery']==pytest.approx(66.7)
+    assert final['quiz_average']==pytest.approx(66.7)
     assert c.post(f"/api/revisions/{final['revisions'][0]['id']}/complete",json={}).status_code==200
 
 def test_foreign_run_and_question_rejected(clients):

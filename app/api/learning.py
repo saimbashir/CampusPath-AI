@@ -1,4 +1,4 @@
-import os
+import os, asyncio, logging
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
@@ -18,12 +18,12 @@ from app.assessment.feedback import teaching_feedback
 @router.get('/courses/{cid}/students/{sid}/progress')
 def progress(cid:int,sid:int,user=Depends(current_user),db=Depends(get_db)):
     student_access(db,user,cid,sid)
-    result=snapshot(db,sid,cid)
-    if user.role=='student':
-        from app.models import VivaSession,VivaTurn
-        scores=list(db.scalars(select(VivaTurn.reviewed_score).join(VivaSession,VivaSession.id==VivaTurn.session_id).where(VivaSession.student_id==sid,VivaSession.course_id==cid,VivaTurn.reviewed_score.is_not(None))))
-        result['viva_average']=round(sum(scores)/len(scores),1) if scores else None
-        result['viva_reviewed_count']=len(scores)
+    if user.role=='teacher':
+        from app.services.official_progress import official_snapshot
+        result=official_snapshot(db,sid,cid)
+    else:
+        from app.services.private_progress import private_progress
+        result=private_progress(db,sid,cid,snapshot(db,sid,cid))
     db.commit();return result
 @router.post('/courses/{cid}/tutor')
 async def tutor(cid:int,data:TutorInput,user=Depends(current_user),db=Depends(get_db)):
@@ -60,14 +60,15 @@ async def tutor(cid:int,data:TutorInput,user=Depends(current_user),db=Depends(ge
     source_ids=[c['id'] for c in chunks]
     if not DEMO_MODE and os.getenv('LLM_API_KEY'):
         try:
-            result=await CompatibleLLM().answer(data.question,chunks,data.mode)
+            result=await asyncio.wait_for(CompatibleLLM().answer(data.question,chunks,data.mode),timeout=20)
             answer=result['answer'];source_ids=result['source_ids'];status='LIVE PROVIDER'
             if data.teacher_only or db.get(Course,cid).material_only:
                 from app.ai.grounded import GroundingVerdict
                 from app.ai.providers import structured_generation
-                verdict=await structured_generation('Verify that every substantive claim in this tutor answer is supported by the provided sources. Reject external facts. Answer: '+answer,chunks,GroundingVerdict)
+                verdict=await asyncio.wait_for(structured_generation('Verify that every substantive claim in this tutor answer is supported by the provided sources. Reject external facts. Answer: '+answer,chunks,GroundingVerdict),timeout=15)
                 if not verdict.supported or not set(verdict.source_ids)<={c['id'] for c in chunks}:answer='';raise ValueError('Answer support check failed.')
-        except Exception:answer='';status='EXTRACTIVE FALLBACK — provider unavailable or invalid output'
+        except Exception as exc:
+            logging.getLogger('campuspath.ai').warning('Tutor failed: %s',type(exc).__name__);answer='';status='EXTRACTIVE FALLBACK — provider unavailable, timed out or invalid output'
     if not answer:
         if data.mode=='Socratic Mode':answer='Read the excerpt below. Which rule applies, and why? Explain your reasoning before checking a worked solution.\n\n'+chunks[0]['text']
         elif data.mode=='Roman Urdu':answer='Yeh aap ke accessible course material ka relevant hissa hai. Offline mode mein nayi translation generate nahi hoti; sample bilingual notes hon to neeche dikhayi jati hain.\n\n'+chunks[0]['text']
@@ -94,11 +95,11 @@ async def start(cid:int,data:StartQuiz,user=Depends(current_user),db=Depends(get
         from app.ai.practice_quiz import build_questions
         from app.auth.security import throttle
         if data.bloom_distribution or data.clo_distribution:raise HTTPException(422,'Bloom/CLO quotas are available only for the reviewed question bank.')
-        scope=MaterialScope(resource_ids=data.resource_ids,page_from=data.page_from,page_to=data.page_to,heading=data.heading,topic_ids=([data.topic_id] if data.topic_id else data.topic_ids))
+        scope=MaterialScope(resource_ids=data.resource_ids,chapters=data.chapters,page_from=data.page_from,page_to=data.page_to,heading=data.heading,topic_ids=([data.topic_id] if data.topic_id else data.topic_ids))
         evidence=resolve(db,cid,scope,limit=None)
         throttle(db,'practice-quiz:'+str(user.id),15)
         questions,provider=await build_questions(evidence,data.count,data.difficulty)
-        if not questions:raise HTTPException(409,'No reliable four-option questions could be created from this selection in the current provider mode. Try a broader range or Mixed/Easy difficulty.')
+        if not questions:raise HTTPException(409,'Could not prepare reliable four-option questions within the generation time limit. Try fewer questions, a broader source range, or the reviewed question bank. No marks or questions were invented.')
         notice='' if len(questions)==data.count else f'Only {len(questions)} of {data.count} distinct source-supported questions could be prepared. Choose more material for a longer quiz.'
         run=QuizRun(student_id=user.id,course_id=cid,mode=data.mode,question_ids=[-i for i in range(1,len(questions)+1)],cursor=0,difficulty=1,settings={'practice_questions':questions,'practice_answers':{},'practice_provider':provider,'coverage_notice':notice,'total_marks':data.total_marks,'requested_count':data.count},hint_ids=[],question_started=now(),expires=now()+timedelta(minutes=data.minutes))
         db.add(run);db.commit();return quiz_payload(db,run)

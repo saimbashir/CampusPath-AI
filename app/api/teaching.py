@@ -7,7 +7,7 @@ from app.db import get_db
 from app.models import User,Enrollment,Course,Topic,Assignment,Submission,Note,Audit,TeacherKey,Resource,ResourceBlob,VivaTurn,VivaSession,now
 from app.schemas import AssignmentInput,TextInput,GradeInput,SubmissionInput
 from app.auth.security import current_user,role,course_access,student_access,audit
-from app.services.learning import snapshot
+from app.services.official_progress import official_snapshot as snapshot,visible_topic,avg
 from app.ai.assignment_review import unpack_feedback,pack_feedback,pending
 from app.auth.security import throttle
 router=APIRouter(prefix='/api')
@@ -20,19 +20,21 @@ def students(cid:int,q:str='',user=Depends(current_user),db=Depends(get_db)):
         if q.lower() not in (student.name+' '+student.university_id+' '+student.email).lower():continue
         state=snapshot(db,student.id,cid)
         grades=db.scalars(select(Submission.grade).join(Assignment,Submission.assignment_id==Assignment.id).where(Assignment.course_id==cid,Submission.student_id==student.id,Submission.grade.is_not(None))).all()
-        result.append({'id':student.id,'name':student.name,'university_id':student.university_id,'email':student.email,'section':course.section,'mastery':state['mastery'],'quiz_average':state['quiz_average'],'assignment_average':round(sum(grades)/len(grades)) if grades else None,'viva_average':state.get('viva_average'),'readiness':state['readiness'],'trend':state['trend'],'status':state['status'],'weakest_topic':min(state['topics'],key=lambda t:t['mastery'])['name'] if state['topics'] else None})
+        result.append({'id':student.id,'name':student.name,'university_id':student.university_id,'email':student.email,'section':course.section,'mastery':state['mastery'],'quiz_average':state['quiz_average'],'assignment_average':round(sum(grades)/len(grades)) if grades else None,'viva_average':state.get('viva_average'),'readiness':state['readiness'],'trend':state['trend'],'status':state['status'],'weakest_topic':min([t for t in state['topics'] if t['mastery'] is not None],key=lambda t:t['mastery'],default={}).get('name')})
     audit(db,user,'student directory viewed',cid);db.commit();return result
 @router.get('/courses/{cid}/analytics')
 def analytics(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)
-    ids=db.scalars(select(Enrollment.student_id).where(Enrollment.course_id==cid)).all()
+    ids=list(db.scalars(select(Enrollment.student_id).where(Enrollment.course_id==cid)))
     states=[snapshot(db,sid,cid) for sid in ids]
-    topics=db.scalars(select(Topic).where(Topic.course_id==cid)).all()
-    from app.models import Answer,Question
-    answers=db.execute(select(Answer,Question).join(Question,Question.id==Answer.question_id).where(Question.course_id==cid)).all()
-    bloom={}
-    for a,q in answers:bloom.setdefault(q.bloom,[]).append(a.correct)
-    return {'students':len(ids),'mastery':round(sum(s['mastery'] for s in states)/len(states)) if states else None,'support_count':sum(s['status']=='NEEDS SUPPORT' for s in states),'topics':[{'id':t.id,'name':t.name,'mastery':round(sum(next((v['mastery'] for v in s['topics'] if v['id']==t.id),20) for s in states)/len(states)) if states else None} for t in topics],'clos':{clo:round(sum(s['clos'].get(clo,0) for s in states)/len(states)) for clo in {t.clo for t in topics}} if states else {},'bloom':{k:round(100*sum(v)/len(v)) for k,v in bloom.items()},'misconceptions':[m for s in states for m in s['misconceptions']],'methodology':'Mastery is a model estimate. Bloom uses submitted question accuracy; CLO uses topic mastery. Empty evidence is shown as unavailable.'}
+    topics=[t for t in db.scalars(select(Topic).where(Topic.course_id==cid)) if visible_topic(t)]
+    def aggregate(key):
+        groups={}
+        for state in states:
+            for label,value in state[key].items():
+                if value is not None:groups.setdefault(label,[]).append(value)
+        return {k:avg(v) for k,v in groups.items()}
+    return {'students':len(ids),'mastery':avg([s['mastery'] for s in states if s['mastery'] is not None]),'support_count':sum(s['status']=='NEEDS SUPPORT' for s in states),'topics':[{'id':t.id,'name':t.name,'mastery':avg([v['mastery'] for s in states for v in s['topics'] if v['id']==t.id and v['mastery'] is not None])} for t in topics],'clos':aggregate('clos'),'bloom':aggregate('bloom'),'misconceptions':[],'methodology':'Only confirmed teacher-assigned viva and assignment results. Personal practice, tutor and study activity are not included.'}
 @router.post('/courses/{cid}/copilot')
 def copilot(cid:int,data:TextInput,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)
@@ -44,7 +46,7 @@ def copilot(cid:int,data:TextInput,user=Depends(current_user),db=Depends(get_db)
     affected=[]
     for r in rows:
         state=snapshot(db,r['id'],cid)
-        weak=[t for t in state['topics'] if t['mastery']<60 and (target is None or t['id']==target.id)]
+        weak=[t for t in state['topics'] if t['mastery'] is not None and t['mastery']<60 and (target is None or t['id']==target.id)]
         if weak:affected.append({'name':r['name'],'university_id':r['university_id'],'evidence':[f"{t['name']}: {t['mastery']}% estimated mastery" for t in weak]})
     title=target.name if target else 'the weakest concepts'
     activity=f'15-minute activity for {title}: 3 minutes recall prerequisites; 4 minutes model a worked example; 4 minutes guided practice; 3 minutes independent check; 1 minute collect exit tickets.'

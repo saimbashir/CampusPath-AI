@@ -183,6 +183,7 @@ async def questions(evidence,topics,config,existing_prompts=None):
         windows=_windows(evidence,LLM_EXCERPTS_PER_CALL)
         if not windows:raise ValueError('No course material was selected.')
         max_rounds=max(6,len(windows)+2,-(-count//LLM_QUESTIONS_PER_CALL)*3)
+        if config.get('personal_practice'):max_rounds=min(max_rounds,max(2,-(-count//LLM_QUESTIONS_PER_CALL)+1))
         failures=0
         for round_number in range(max_rounds):
             need=count-len(accepted)
@@ -225,7 +226,7 @@ async def questions(evidence,topics,config,existing_prompts=None):
                 for q in candidates:
                     if q not in kept:bloom_left[q.bloom]+=1
             accepted.extend(kept[:count-len(accepted)])
-        if len(accepted)<count:
+        if len(accepted)<count and not (config.get('personal_practice') and accepted):
             raise ValueError(f'Only {len(accepted)} of {count} questions passed the source checks. Select more material, ask for fewer questions, or try again.')
         for i,q in enumerate(accepted):q.marks=allocations[i]
         return accepted,'AI GROUNDED'

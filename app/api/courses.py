@@ -40,13 +40,20 @@ def join(data:CodeInput,user=Depends(current_user),db=Depends(get_db)):
     except IntegrityError:db.rollback();raise HTTPException(409,'Already enrolled.')
     return course_dict(c,user)
 @router.get('/courses/{cid}/topics')
-def topics(cid:int,user=Depends(current_user),db=Depends(get_db)):
+def topics(cid:int,include_archived:bool=False,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid)
-    return [{k:getattr(t,k) for k in ('id','name','description','prerequisites','clo','difficulty')} for t in db.scalars(select(Topic).where(Topic.course_id==cid))]
+    from app.services.official_progress import visible_topic
+    rows=list(db.scalars(select(Topic).where(Topic.course_id==cid)))
+    visible={t.id for t in rows if visible_topic(t)}
+    if include_archived and user.role!='teacher':raise HTTPException(403,'Only course teachers can manage archived concepts.')
+    return [{**{k:getattr(t,k) for k in ('id','name','description','clo','difficulty')},'prerequisites':[p for p in (t.prerequisites or []) if p in visible],'chapter':(t.structure or {}).get('chapter',''),'unit':(t.structure or {}).get('unit',''),'source_ids':(t.structure or {}).get('source_ids',[]),'archived':bool((t.structure or {}).get('archived'))} for t in rows if (t.id in visible or (include_archived and (t.structure or {}).get('archived') and not (t.structure or {}).get('practice_anchor')))]
 @router.post('/courses/{cid}/topics',status_code=201)
 def add_topic(cid:int,data:TopicInput,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)
-    t=Topic(course_id=cid,**data.model_dump());db.add(t);db.flush()
+    if data.source_ids:
+        from app.services.materials import MaterialScope,resolve
+        resolve(db,cid,MaterialScope(chunk_ids=data.source_ids))
+    t=Topic(course_id=cid,**data.model_dump(exclude={'chapter','unit','source_ids'}),structure={'chapter':data.chapter,'unit':data.unit,'source_ids':data.source_ids or []});db.add(t);db.flush()
     try:validate_dag(db.scalars(select(Topic).where(Topic.course_id==cid)).all())
     except ValueError as e:db.rollback();raise HTTPException(422,str(e))
     audit(db,user,'topic created',t.id);db.commit();return {'id':t.id}
@@ -55,10 +62,25 @@ def edit_topic(cid:int,tid:int,data:TopicInput,user=Depends(current_user),db=Dep
     course_access(db,user,cid,True)
     t=db.get(Topic,tid)
     if not t or t.course_id!=cid:raise HTTPException(404,'Topic not found.')
-    for k,v in data.model_dump().items():setattr(t,k,v)
+    if (t.structure or {}).get('practice_anchor'):raise HTTPException(404,'Concept not found.')
+    if data.source_ids:
+        from app.services.materials import MaterialScope,resolve
+        resolve(db,cid,MaterialScope(chunk_ids=data.source_ids))
+    for k,v in data.model_dump(exclude={'chapter','unit','source_ids'}).items():setattr(t,k,v)
+    t.structure={**(t.structure or {}),'chapter':data.chapter,'unit':data.unit,'automatic_material_topic':False,**({'source_ids':data.source_ids} if data.source_ids is not None else {})}
     try:validate_dag(db.scalars(select(Topic).where(Topic.course_id==cid)).all())
     except ValueError as e:db.rollback();raise HTTPException(422,str(e))
     audit(db,user,'topic edited',t.id);db.commit();return {'ok':True}
+@router.post('/courses/{cid}/topics/{tid}/archive')
+def archive_topic(cid:int,tid:int,user=Depends(current_user),db=Depends(get_db)):
+    course_access(db,user,cid,True);t=db.get(Topic,tid)
+    if not t or t.course_id!=cid or (t.structure or {}).get('practice_anchor'):raise HTTPException(404,'Topic not found.')
+    t.structure={**(t.structure or {}),'archived':True};audit(db,user,'topic archived',tid);db.commit();return {'ok':True}
+@router.post('/courses/{cid}/topics/{tid}/restore')
+def restore_topic(cid:int,tid:int,user=Depends(current_user),db=Depends(get_db)):
+    course_access(db,user,cid,True);t=db.get(Topic,tid)
+    if not t or t.course_id!=cid or (t.structure or {}).get('practice_anchor'):raise HTTPException(404,'Topic not found.')
+    t.structure={**(t.structure or {}),'archived':False,'automatic_material_topic':False};audit(db,user,'topic restored',tid);db.commit();return {'ok':True}
 @router.get('/courses/{cid}/resources')
 def resources(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid)

@@ -24,6 +24,8 @@ def current_user(request: Request, db=Depends(get_db)):
     request.state.session=session
     user=db.get(User,session.user_id)
     if not user or not user.active:raise HTTPException(401,'Account is inactive. Contact your administrator.')
+    expected=request.headers.get('x-workspace-user')
+    if expected is not None and expected!=str(user.id):raise HTTPException(409,'Account changed in another tab. Reload and sign in again.')
     return user
 def role(user,*roles):
     if user.role not in roles: raise HTTPException(403,'Access denied for this role.')
@@ -44,12 +46,10 @@ def throttle(db, key, limit=8):
     from sqlalchemy import case
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
     from sqlalchemy.dialects.postgresql import insert as postgres_insert
-
     key = digest(key)
     current = now()
     deadline = current + timedelta(minutes=15)
     insert = sqlite_insert if db.bind.dialect.name == 'sqlite' else postgres_insert
-
     statement = insert(LoginThrottle).values(key=key, count=1, until=deadline)
     statement = statement.on_conflict_do_update(
         index_elements=[LoginThrottle.key],
@@ -59,8 +59,6 @@ def throttle(db, key, limit=8):
         },
         where=(LoginThrottle.until <= current) | (LoginThrottle.count < limit)
     ).returning(LoginThrottle.count)
-
-    # RETURNING works for both SQLite and PostgreSQL and avoids unreliable INSERT rowcount.
     accepted = db.execute(statement).scalar_one_or_none()
     db.commit()
     if accepted is None:

@@ -24,13 +24,6 @@ def evaluate_retrieval(cid:int,data:RetrievalCase,user=Depends(current_user),db=
 @router.get('/{cid}/research')
 def research(cid:int,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)
-    rows=db.scalars(select(Answer).join(Question,Question.id==Answer.question_id).where(Question.course_id==cid)).all()
-    questions=db.scalars(select(Question).where(Question.course_id==cid)).all()
+    questions=list(db.scalars(select(Question).where(Question.course_id==cid)))
     generated=[q for q in questions if q.source.startswith('AI GENERATED')]
-    deltas=[a.mastery_after-a.mastery_before for a in rows]
-    turns=db.scalars(select(VivaTurn).join(VivaSession,VivaSession.id==VivaTurn.session_id).where(VivaSession.course_id==cid)).all()
-    matched=[t for t in turns if t.proposed_score is not None and t.reviewed_score is not None]
-    return {'observations':len(rows),'mean_mastery_change_pp':round(100*sum(deltas)/len(deltas),2) if deltas else None,
-            'generated_questions':len(generated),'current_approval_rate':round(100*sum(q.approved for q in generated)/len(generated),1) if generated else None,
-            'reviewed_ai_viva_pairs':len(matched),'viva_mean_absolute_error':round(sum(abs(t.proposed_score-t.reviewed_score) for t in matched)/len(matched),2) if matched else None,
-            'methodology':'Descriptive metrics from saved course evidence. Mastery change is a model update, not proof of learning or a causal remediation effect. Current approval rate is not a historical approval experiment. Viva error compares AI proposals to teacher scores only where both exist.'}
+    return {'observations':0,'mean_mastery_change_pp':None,'generated_questions':len(generated),'current_approval_rate':round(100*sum(q.approved for q in generated)/len(generated),1) if generated else None,'reviewed_ai_viva_pairs':0,'viva_mean_absolute_error':None,'methodology':'Private practice evidence is excluded. Question-bank approval is a teacher workflow metric.'}

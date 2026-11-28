@@ -1,5 +1,5 @@
 """Private source-grounded MCQs. Offline questions require explicit source facts."""
-import re
+import re, asyncio, logging
 from secrets import SystemRandom
 from app.ai import grounded
 from app.services.materials import spread
@@ -45,7 +45,7 @@ async def build_questions(evidence, count, difficulty=None):
     if grounded.enabled():
         selected=spread(evidence,min(len(evidence),max(12,count*2)))
         try:
-            drafts,provider=await grounded.questions(selected,[],{'count':count,'total_marks':count,'difficulty':str(difficulty) if difficulty else 'Mixed','question_types':['MCQ'],'bloom_distribution':{},'coverage_instruction':'Exactly four distinct plausible options and one defensible correct answer. Use concise self-contained exam-style stems, no pasted source paragraphs or file names. Explain why the correct answer fits the material. Test different concepts.'})
+            drafts,provider=await asyncio.wait_for(grounded.questions(selected,[],{'count':count,'total_marks':count,'personal_practice':True,'difficulty':str(difficulty) if difficulty else 'Mixed','question_types':['MCQ'],'bloom_distribution':{},'coverage_instruction':'Exactly four distinct plausible options and one defensible correct answer. Use concise self-contained exam-style stems, no pasted source paragraphs or file names. Explain why the correct answer fits the material. Test different concepts.'}),timeout=45)
             mapping={s['id']:s for s in selected};items=[]
             for q in drafts:
                 if q.question_type!='MCQ' or len(q.options)!=4 or len({x.strip().casefold() for x in q.options})!=4 or any(not x.strip() for x in q.options):raise ValueError('Invalid MCQ choices')
@@ -53,9 +53,9 @@ async def build_questions(evidence, count, difficulty=None):
                 if len(q.question_text)>400:raise ValueError('Question is not concise')
                 sources=grounded.validate_citations(q.citations,selected)
                 items.append({'prompt':q.question_text,'options':q.options,'correct':q.correct_option,'explanation':' '.join(q.acceptable_answer_points),'difficulty':q.difficulty,'bloom':q.bloom,'topic':sources[0].get('structure',{}).get('heading') or 'Course material','sources':[{'id':s['id'],'filename':s['filename'],'location':s['location']} for s in sources]})
-            if len(items)==count:return items,provider
-        except Exception:
-            pass
+            if items:return items,provider
+        except Exception as exc:
+            logging.getLogger('campuspath.ai').warning('Practice quiz generation failed: %s',type(exc).__name__)
     return offline_questions(evidence,count,difficulty),'OFFLINE SOURCE PRACTICE'
 
 

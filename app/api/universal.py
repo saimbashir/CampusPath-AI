@@ -23,7 +23,7 @@ def catalog(cid:int,user=Depends(current_user),db=Depends(get_db)):
         groups[r.id].append({'id':ch.id,'location':ch.location,'structure':source_metadata(ch.location,ch.text,ch.structure)})
     return {'material_only':c.material_only,'resources':[{'id':r.id,'filename':r.filename,'status':r.status,'chunks':groups[r.id]} for r in resources if groups[r.id]],
             'unready_resources':[{'id':r.id,'filename':r.filename,'status':r.status,'status_detail':r.status_detail} for r in resources if not groups[r.id]],
-            'topics':[{'id':t.id,'name':t.name,'clo':t.clo,'structure':t.structure or {}} for t in db.scalars(select(Topic).where(Topic.course_id==cid))]}
+            'topics':[{'id':t.id,'name':t.name,'clo':t.clo,'structure':t.structure or {}} for t in db.scalars(select(Topic).where(Topic.course_id==cid)) if not (t.structure or {}).get('practice_anchor') and not (t.structure or {}).get('automatic_material_topic') and not (t.structure or {}).get('archived')]}
 @router.post('/{cid}/material-query')
 def query(cid:int,data:MaterialScope,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid);return resolve(db,cid,data)
@@ -66,7 +66,7 @@ def approve(cid:int,data:StructureDraft,user=Depends(current_user),db=Depends(ge
 @router.put('/{cid}/topics/{tid}/structure')
 def update_structure(cid:int,tid:int,data:Concept,user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True);topic=db.get(Topic,tid)
-    if not topic or topic.course_id!=cid:raise HTTPException(404,'Topic not found.')
+    if not topic or topic.course_id!=cid or (topic.structure or {}).get('practice_anchor'):raise HTTPException(404,'Topic not found.')
     sources=resolve(db,cid,MaterialScope(chunk_ids=[c.chunk_id for c in data.citations]))
     try:validate_citations(data.citations,sources)
     except ValueError as exc:raise HTTPException(422,str(exc))

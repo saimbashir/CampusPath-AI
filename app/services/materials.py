@@ -9,6 +9,7 @@ class MaterialScope(Input):
     resource_ids:list[int]=Field(default_factory=list,max_length=100)
     chunk_ids:list[int]=Field(default_factory=list,max_length=300)
     topic_ids:list[int]=Field(default_factory=list,max_length=100)
+    topic_names:list[str]=Field(default_factory=list,max_length=100)
     chapters:list[str]=Field(default_factory=list,max_length=100)
     units:list[str]=Field(default_factory=list,max_length=100)
     sections:list[str]=Field(default_factory=list,max_length=100)
@@ -106,6 +107,26 @@ def annotated(parts,filename,outline=None):
             for piece in split_text(body):
                 if piece.strip():yield location,piece.strip(),source_metadata(location,piece,meta)
 
+def _filter_text(value):
+    return ' '.join(re.sub(r'[^\w]+',' ',str(value or '').casefold()).split())
+
+def _label_matches(value,meta,key):
+    query=_filter_text(value)
+    if not query:return False
+    labels=[_filter_text(meta.get(key)),_filter_text(meta.get(key+'_title'))]
+    if query in labels:return True
+    # Accept a real chapter number even when PDF headings lack a separating space.
+    bare=re.sub(r'^(chapter|unit|section|lecture|lesson|module)\s+','',query)
+    if bare.isdigit():
+        for label in labels:
+            candidate=re.sub(r'^(chapter|unit|section|lecture|lesson|module)\s+','',label)
+            if re.match(r'^'+re.escape(bare)+r'(?![0-9])',candidate):return True
+    return any(query in label.split(' | ') or (' '+query+' ') in (' '+label+' ') for label in labels if label)
+
+def _phrase_matches(query,*values):
+    needle=_filter_text(query)
+    return bool(needle) and any((' '+needle+' ') in (' '+_filter_text(v)+' ') for v in values)
+
 def resolve(db,cid,scope,limit=300):
     """All selectors combine by intersection; omitted selectors mean all teacher material."""
     if isinstance(scope,dict):scope=MaterialScope.model_validate(scope)
@@ -129,26 +150,30 @@ def resolve(db,cid,scope,limit=300):
                 source_ids.update(c.id for c,r in rows if name in c.text.casefold() or name in str(source_metadata(c.location,c.text,c.structure).get('heading','')).casefold())
         if not source_ids:raise HTTPException(409,'No indexed teacher excerpts match the selected topic. Choose a document, page/slide range or heading instead.')
     else:source_ids=None
-    matching_slides=set()
-    if scope.heading:
-        query=scope.heading.casefold().strip()
-        for c,r in rows:
-            m=source_metadata(c.location,c.text,c.structure)
-            if m.get('slide') and any(query in str(value).casefold() for value in (m.get('heading',''),c.text)):
-                matching_slides.add((r.id,m['slide']))
+    manual_labels={key:{c.id for c,r in rows if any(c.id in (t.structure or {}).get('source_ids',[]) and any(_label_matches(value,t.structure or {},key) for value in values) for t in topics if not (t.structure or {}).get('automatic_material_topic'))} for key,values in [('chapter',scope.chapters),('unit',scope.units),('section',scope.sections)] if values}
+    typed_topics=[name.strip() for name in scope.topic_names if name.strip()]
+    typed_ids={i for t in topics if any(_filter_text(t.name)==_filter_text(name) for name in typed_topics) for i in (t.structure or {}).get('source_ids',[])}
+    heading_pages=set();topic_pages=set()
+    for c,r in rows:
+        m=source_metadata(c.location,c.text,c.structure)
+        position=m.get('position')
+        if not position:continue
+        key=(r.id,c.location.split(' · ')[0],position)
+        if scope.heading and _phrase_matches(scope.heading,m.get('heading'),m.get('chapter_title'),m.get('section_title'),c.text):heading_pages.add(key)
+        if typed_topics and (c.id in typed_ids or any(_phrase_matches(name,m.get('heading'),m.get('chapter_title'),m.get('section_title'),c.text) for name in typed_topics)):topic_pages.add(key)
     result=[]
     for c,r in rows:
         m=source_metadata(c.location,c.text,c.structure)
         if scope.resource_ids and r.id not in scope.resource_ids:continue
         if scope.chunk_ids and c.id not in scope.chunk_ids:continue
         if source_ids is not None and c.id not in source_ids:continue
-        if any(values and str(m.get(key,'')) not in values for key,values in [('chapter',scope.chapters),('unit',scope.units),('section',scope.sections)]):continue
+        if any(values and c.id not in manual_labels.get(key,set()) and not any(_label_matches(value,m,key) for value in values) for key,values in [('chapter',scope.chapters),('unit',scope.units),('section',scope.sections)]):continue
         position=m.get('position')
         if scope.page_from and (not position or position<scope.page_from):continue
         if scope.page_to and (not position or position>scope.page_to):continue
-        if scope.heading:
-            words=scope.heading.casefold().strip()
-            if (r.id,m.get('slide')) not in matching_slides and not any(words in str(value).casefold() for value in (m.get('heading',''),m.get('chapter_title',''),m.get('section_title',''),c.text)):continue
+        key=(r.id,c.location.split(' · ')[0],position)
+        if scope.heading and key not in heading_pages and not _phrase_matches(scope.heading,m.get('heading'),m.get('chapter_title'),m.get('section_title'),c.text):continue
+        if typed_topics and key not in topic_pages and c.id not in typed_ids and not any(_phrase_matches(name,m.get('heading'),m.get('chapter_title'),m.get('section_title'),c.text) for name in typed_topics):continue
         result.append({'id':c.id,'resource_id':r.id,'filename':r.filename,'location':c.location,'text':c.text,'structure':m})
     if not result:
         states=list(db.execute(select(Resource.filename,Resource.status,Resource.status_detail).where(Resource.course_id==cid,Resource.owner_id.is_(None))).all())

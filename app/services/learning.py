@@ -6,9 +6,11 @@ from app.mastery.engine import confidence,revision_dates,update_mastery
 from app.knowledge_graph.engine import learning_order
 
 def snapshot(db,student_id,course_id):
-    topics=db.scalars(select(Topic).where(Topic.course_id==course_id)).all()
+    from app.services.official_progress import visible_topic
+    topics=[t for t in db.scalars(select(Topic).where(Topic.course_id==course_id)) if visible_topic(t)]
     states={m.topic_id:m for m in db.scalars(select(Mastery).join(Topic,Mastery.topic_id==Topic.id).where(Mastery.student_id==student_id,Topic.course_id==course_id))}
     answers=db.scalars(select(Answer).join(Question,Answer.question_id==Question.id).where(Answer.student_id==student_id,Question.course_id==course_id).order_by(Answer.created)).all()
+    states={tid:m for tid,m in states.items() if tid in {t.id for t in topics}}
     p={t.id:states[t.id].probability if t.id in states else .2 for t in topics}
     average=sum(p.values())/len(p) if p else 0
     coverage=sum(m.attempts>0 for m in states.values())/len(topics) if topics else 0

@@ -31,6 +31,7 @@ def notifications(user=Depends(current_user),db=Depends(get_db)):
     if user.role!='admin':
         accessible=teacher_courses(user) if user.role=='teacher' else select(Enrollment.course_id).where(Enrollment.student_id==user.id)
         query=query.where(Notification.course_id.is_(None)|Notification.course_id.in_(accessible))
+    if user.role=='teacher':query=query.where(Notification.target!='viva-review',~Notification.event_key.startswith('viva:'))
     rows=db.scalars(query.order_by(Notification.read.asc(),Notification.created.desc(),Notification.id.desc()).limit(100)).all()
     return [{'id':n.id,'course_id':n.course_id,'title':n.title,'message':('Your assigned assessment has been reviewed. Contact your teacher for feedback.' if user.role=='student' and n.event_key.startswith(('oral-final:','grade:')) else n.message),'target':n.target,'read':n.read,'created':n.created} for n in rows]
 @router.post('/notifications/{nid}/read')

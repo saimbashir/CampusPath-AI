@@ -90,9 +90,6 @@ def refresh(db,user):
     elif user.role=='teacher':
         for q in db.scalars(select(Question).where(Question.course_id.in_(teacher_courses(user)),Question.approved.is_(False))):
             notify(db,user.id,q.course_id,f'question:{q.id}','Question awaiting review',q.prompt[:180],'questions')
-        from app.models import VivaSession,VivaTurn
-        for turn,session in db.execute(select(VivaTurn,VivaSession).join(VivaSession,VivaSession.id==VivaTurn.session_id).where(VivaSession.course_id.in_(teacher_courses(user)),VivaTurn.reviewed_at.is_(None),~VivaTurn.provider.in_(['AI PRACTICE','PRACTICE OFFLINE','PRACTICE FALLBACK']))):
-            notify(db,user.id,session.course_id,f'viva:{turn.id}','Viva response awaiting review','Review the transcript and rubric before confirming the score.','viva-review')
         from app.models import OralSession,VivaExam
         for session,exam in db.execute(select(OralSession,VivaExam).join(VivaExam,VivaExam.id==OralSession.viva_id).where(VivaExam.course_id.in_(teacher_courses(user)),OralSession.status=='TEACHER_REVIEW_REQUIRED')):
             notify(db,user.id,exam.course_id,f'oral-review:{session.id}','Viva ready for marking',exam.title+' has a submitted session awaiting confirmation.','oral-review')

@@ -1,3 +1,4 @@
+import asyncio
 from pydantic import BaseModel,ConfigDict,Field
 from app.ai.providers import structured_generation
 class VivaEvaluation(BaseModel):
@@ -40,10 +41,10 @@ async def material_questions(evidence,count,language,difficulty):
     mapping={s['id']:s for s in sampled}
     if grounded.enabled():
         try:
-            questions,status=await grounded.questions(sampled,[],{
-                'count':count,'total_marks':count,'difficulty':difficulty,
+            questions,status=await asyncio.wait_for(grounded.questions(sampled,[],{
+                'count':count,'total_marks':count,'personal_practice':True,'difficulty':difficulty,
                 'question_types':['Oral Viva'],'language':language,
-                'coverage_instruction':'Use the requested language. For Roman Urdu use Latin letters. Ask concise standalone exam-style questions (one or two short sentences, at most 200 characters). Name the actual concept. Never paste an excerpt, filename, page number, quotation, or answer into the question. Keep source references in citations only. Questions must test distinct knowledge when supported. No outside facts or invented examples.'})
+                'coverage_instruction':'Use the requested language. For Roman Urdu use Latin letters. Ask concise standalone exam-style questions (one or two short sentences, at most 200 characters). Name the actual concept. Never paste an excerpt, filename, page number, quotation, or answer into the question. Keep source references in citations only. Questions must test distinct knowledge when supported. No outside facts or invented examples.'}),timeout=45)
             output=[]
             for q in questions:
                 sources=[mapping[c.chunk_id] for c in q.citations if c.chunk_id in mapping]
@@ -51,7 +52,7 @@ async def material_questions(evidence,count,language,difficulty):
                 prompt=q.question_text.strip()
                 if len(prompt)>240 or '\n' in prompt or any(s['filename'].casefold() in prompt.casefold() for s in sources):raise ValueError('Question is not a concise standalone exam prompt')
                 output.append({'prompt':prompt,'style':'AI grounded','sources':sources,'language':language,'provider':status})
-            if len(output)==count:return output
+            if output:return output
         except Exception:
             import logging
             logging.getLogger('campuspath.viva').warning('Material practice question generation unavailable; using source-based prompts.')
