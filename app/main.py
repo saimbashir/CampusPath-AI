@@ -1,4 +1,5 @@
 from pathlib import Path
+import asyncio
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse,JSONResponse,PlainTextResponse,Response
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +16,11 @@ async def lifespan(_app):
     from app.services.bootstrap import ensure_accounts
     ensure_accounts()
     resume_pending()
-    yield
+    deadline_worker=asyncio.create_task(formal_viva.viva_deadline_worker())
+    try:yield
+    finally:
+        deadline_worker.cancel()
+        await asyncio.gather(deadline_worker,return_exceptions=True)
 app=FastAPI(title='CampusPath AI',version='0.7.0',docs_url='/api/docs' if DEMO_MODE else None,redoc_url=None,lifespan=lifespan)
 from app.http_limits import BodyLimitMiddleware
 app.add_middleware(BodyLimitMiddleware,limit=MAX_UPLOAD+1024*1024)
@@ -61,7 +66,7 @@ async def conflict(request,exc):
 @app.get('/api/health')
 def health():
     import os
-    return {'max_upload_mib':MAX_UPLOAD//(1024*1024),'stt_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('STT_MODEL')),'tts_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('TTS_MODEL')),'status':'ok','demo_mode':DEMO_MODE,'teacher_self_registration':auth.teacher_self_registration_enabled(),'version':'0.7.0','voice':'PCM WebSocket with energy VAD, per-turn STT and controlled playback'
+    return {'max_upload_mib':MAX_UPLOAD//(1024*1024),'stt_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('STT_MODEL')),'tts_configured':bool(os.getenv('SPEECH_API_KEY') and os.getenv('TTS_MODEL')),'status':'ok','demo_mode':DEMO_MODE,'teacher_self_registration':auth.teacher_self_registration_enabled(),'assigned_viva_policy':'fixed-approved-120s-v1','version':'0.7.0','voice':'PCM WebSocket with energy VAD, per-turn STT and controlled playback'
         ,'voice_transport':'websocket-pcm-vad','retrieval':'Lexical index with optional Qdrant hybrid search'}
 SHELL=ROOT/'templates'/'index.html'
 def shell_response(request:Request,private:bool=False):

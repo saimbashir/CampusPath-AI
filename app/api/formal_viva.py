@@ -1,13 +1,13 @@
 """Material-grounded formal oral/written assessments with immutable publication and review."""
 from datetime import datetime,timedelta
 from collections import defaultdict,Counter
-from secrets import SystemRandom
-from itertools import combinations
-from fastapi import APIRouter,Depends,HTTPException
+import asyncio
+import logging
+from fastapi import APIRouter,Depends,HTTPException,BackgroundTasks
 from pydantic import Field,model_validator
-from sqlalchemy import select,update
+from sqlalchemy import select,update,or_
 from app.services.official_progress import visible_topic
-from app.db import get_db
+from app.db import get_db,SessionLocal
 from app.models import VivaExam,VivaQuestion,OralSession,OralResponse,OralReview,Topic,User,Mastery,Revision,Enrollment,now
 from app.schemas import Input
 from app.auth.security import current_user,course_access,role,audit,throttle
@@ -17,17 +17,19 @@ from app.services.notifications import notify
 from app.ai import grounded
 from app.mastery.engine import update_mastery,revision_dates
 router=APIRouter(prefix='/api')
+QUESTION_SECONDS=120
+log=logging.getLogger("campuspath.formal_viva")
 class VivaConfig(Input):
     count:int=Field(default=5,ge=1,le=30)
     total_marks:float=Field(default=25,gt=0,le=1000)
     minutes:int=Field(default=20,ge=1,le=180)
     difficulty:str=Field(default='Mixed',pattern='^(Mixed|1|2|3)$')
-    follow_up_depth:int=Field(default=1,ge=0,le=3)
+    follow_up_depth:int=Field(default=0,ge=0,le=3)
     immediate_feedback:bool=True
     review_required:bool=True
     question_review_required:bool=True
     show_topic:bool=True
-    personalize_questions:bool=True
+    personalize_questions:bool=False
     starts:datetime|None=None
     ends:datetime|None=None
     student_ids:list[int]=Field(default_factory=list,max_length=1000)
@@ -45,6 +47,9 @@ class VivaConfig(Input):
         if self.bloom_distribution and (set(self.bloom_distribution)-levels or sum(self.bloom_distribution.values())!=100 or any(v<0 for v in self.bloom_distribution.values())):raise ValueError('Known Bloom percentages must total 100.')
         allowed={'Oral Viva','MCQ','True/False','Short Answer','Long Answer','Numerical','Problem Solving','Scenario-Based','Conceptual','Definition','Comparison','Programming Question','Application Question','Analysis Question'}
         if not self.question_types or not set(self.question_types)<=allowed:raise ValueError('Select supported question types.')
+        # The formal assessment contract is fixed, regardless of older clients.
+        self.follow_up_depth=0;self.personalize_questions=False;self.minutes=self.count*2
+        self.question_review_required=True;self.review_required=True;self.immediate_feedback=False
         return self
 class CreateViva(Input):
     title:str=Field(min_length=3,max_length=180)
@@ -55,7 +60,9 @@ class AddQuestion(grounded.GroundedQuestion):
 class PublishQuestion(Input):approved:bool
 class OralAnswer(Input):
     turn:int=Field(ge=0)
-    transcript:str=Field(min_length=2,max_length=12000)
+    transcript:str=Field(default="",max_length=12000)
+class OralDraft(OralAnswer):
+    revision:int=Field(ge=1,le=2147483647)
 class ReviewMarks(Input):
     marks:float=Field(ge=0,le=1000)
     feedback:str=Field(min_length=3,max_length=4000)
@@ -82,7 +89,7 @@ def teacher_question(q):return {'id':q.id,'approved':q.approved,**{k:v for k,v i
 
 def exam_payload(db,ex,teacher=False):
     conf=ex.config
-    result={'id':ex.id,'course_id':ex.course_id,'title':ex.title,'status':ex.status,'count':conf['count'],'total_marks':conf['total_marks'],'minutes':conf['minutes'],'starts':conf.get('starts'),'ends':conf.get('ends'),'review_required':True,'immediate_feedback':False,'personalize_questions':conf.get('personalize_questions',False),'created':ex.created}
+    result={'id':ex.id,'course_id':ex.course_id,'title':ex.title,'status':ex.status,'count':conf['count'],'total_marks':conf['total_marks'],'minutes':conf['count']*2,'starts':conf.get('starts'),'ends':conf.get('ends'),'review_required':True,'immediate_feedback':False,'personalize_questions':False,'created':ex.created}
     if teacher:result.update(scope=ex.scope,config=conf,questions=[teacher_question(q) for q in db.scalars(select(VivaQuestion).where(VivaQuestion.viva_id==ex.id).order_by(VivaQuestion.id))])
     return result
 
@@ -95,25 +102,152 @@ def notify_formal_review(db,s,ex):
     recipients={db.get(Course,ex.course_id).teacher_id}|set(db.scalars(select(TeacherAssignment.teacher_id).where(TeacherAssignment.course_id==ex.course_id)))
     for uid in recipients:notify(db,uid,ex.course_id,f'oral-review:{s.id}','Viva ready for marking',ex.title+' has a submitted session awaiting confirmation.','oral-review')
 
-def finish_expired(db,s):
-    if s.status=='IN_PROGRESS' and s.expires<=now():
-        s.status='TEACHER_REVIEW_REQUIRED';s.submitted=now();notify_formal_review(db,s,db.get(VivaExam,s.viva_id));db.commit()
+def clock_state(deadline,draft='',revision=0):
+    # Reuse the existing JSON field; no database migration or history deletion.
+    return {'fixed_viva':True,'deadline':deadline.isoformat(),'draft':draft,'revision':revision}
 
-def session_payload(db,s,ex,teacher=False):
-    finish_expired(db,s);records,latest=latest_responses(db,s);questions=[db.get(VivaQuestion,qid) for qid in s.question_ids]
+def locked_session(db,sid):
+    return db.scalar(select(OralSession).where(OralSession.id==sid).with_for_update().execution_options(populate_existing=True))
+
+def unavailable_feedback(message):
+    return {'correctness':'insufficient_evidence','feedback':message,'confidence':0,'marks':None,'scoring':[],
+            'correct_points':[],'incorrect_points':[],'missing_points':[],'misconceptions':[],'follow_up':'','follow_up_citations':[]}
+
+_evaluating=set()
+async def evaluate_saved_response(response_id):
+    if response_id in _evaluating:return
+    _evaluating.add(response_id)
+    try:await _evaluate_saved_response(response_id)
+    finally:_evaluating.discard(response_id)
+
+async def _evaluate_saved_response(response_id):
+    """Grade an already durable answer. No AI output may change the question sequence."""
+    with SessionLocal() as db:
+        r=db.get(OralResponse,response_id)
+        if not r or r.provider!='PENDING REVIEW':return
+        s=db.get(OralSession,r.session_id);ex=db.get(VivaExam,s.viva_id);q=db.get(VivaQuestion,r.question_id)
+        if s.status=='FINALIZED':return
+        question={**q.content,'question_text':q.prompt,'current_prompt':q.prompt,'question_id':q.id,'marks':q.marks,'allow_follow_up':False}
+        transcript=r.transcript;rubric=ex.config['rubric'];sources=q.content.get('sources',[]);timed_out=bool(r.evaluation.get('timed_out'))
+    try:
+        evaluation,provider=await asyncio.wait_for(grounded.evaluate(question,transcript,[],rubric,sources),timeout=20)
+        proposed=evaluation.get('marks')
+        if proposed is not None and not 0<=proposed<=question['marks']:raise ValueError('Invalid marks')
+        evaluation={**evaluation,'follow_up':'','follow_up_citations':[]}
+    except Exception as exc:
+        log.warning('Formal viva evaluation failed: %s',type(exc).__name__)
+        evaluation=unavailable_feedback('AI evaluation unavailable. Answer saved; teacher review required.');provider='PROVIDER FALLBACK';proposed=None
+    evaluation['timed_out']=timed_out
+    with SessionLocal() as db:
+        # Lock the parent, so a finalized teacher review cannot be overwritten.
+        r=db.get(OralResponse,response_id)
+        if not r:return
+        s=locked_session(db,r.session_id)
+        if s.status=='FINALIZED':return
+        db.execute(update(OralResponse).where(OralResponse.id==response_id,OralResponse.provider=='PENDING REVIEW').values(evaluation=evaluation,provider=provider,proposed_marks=proposed));db.commit()
+
+def schedule_evaluations(db,s,tasks):
+    if tasks is None or s.status=='FINALIZED':return
+    for rid in db.scalars(select(OralResponse.id).where(OralResponse.session_id==s.id,OralResponse.provider=='PENDING REVIEW')):
+        # Idempotent conditional result write protects concurrent recovery requests.
+        tasks.add_task(evaluate_saved_response,rid)
+
+def save_turn(db,s,ex,text,at,timed_out=False):
+    """Store one approved question response and advance atomically, before grading."""
+    q=db.get(VivaQuestion,s.question_ids[s.cursor]);turn=s.turn
+    text=text.strip();cursor=s.cursor+1;complete=cursor>=len(s.question_ids)
+    if text:
+        evaluation=unavailable_feedback('Answer saved. AI evaluation pending.');provider='PENDING REVIEW';marks=None
+    else:
+        evaluation=unavailable_feedback('No answer submitted before time expired.' if timed_out else 'No answer submitted.')
+        evaluation.update(correctness='incorrect',marks=0,missing_points=['No answer submitted.']);provider='UNANSWERED';marks=0
+    evaluation['timed_out']=timed_out
+    following=clock_state(min(s.expires,at+timedelta(seconds=QUESTION_SECONDS))) if not complete else None
+    claim=db.execute(update(OralSession).where(OralSession.id==s.id,OralSession.turn==turn,OralSession.status=='IN_PROGRESS').values(turn=turn+1,cursor=cursor,follow_depth=0,next_prompt=following,status='TEACHER_REVIEW_REQUIRED' if complete else 'IN_PROGRESS',submitted=at if complete else None))
+    if claim.rowcount!=1:db.rollback();raise HTTPException(409,'Answer already saved. Refresh the session.')
+    db.add(OralResponse(session_id=s.id,question_id=q.id,turn=turn,depth=0,prompt=q.prompt,transcript=text,evaluation=evaluation,proposed_marks=marks,provider=provider))
+    db.flush();db.refresh(s)
+    if complete:notify_formal_review(db,s,ex)
+
+def finish_expired(db,s,tasks=None):
+    if s.status!='IN_PROGRESS':
+        schedule_evaluations(db,s,tasks);return
+    # Old in-progress sessions retain their question IDs and answers. A pending
+    # follow-up is discarded, and already answered main questions are not reissued.
+    s=locked_session(db,s.id)
+    if s.status!='IN_PROGRESS':
+        db.commit();schedule_evaluations(db,s,tasks);return
+    ex=db.get(VivaExam,s.viva_id);stamp=now();changed=False
+    if not (s.next_prompt or {}).get('fixed_viva'):
+        if s.follow_depth:
+            s.cursor+=1
+        s.follow_depth=0
+        if s.cursor>=len(s.question_ids):
+            s.status='TEACHER_REVIEW_REQUIRED';s.submitted=stamp;s.next_prompt=None;notify_formal_review(db,s,ex)
+        else:s.next_prompt=clock_state(min(s.expires,stamp+timedelta(seconds=QUESTION_SECONDS)))
+        db.flush();changed=True
+    while s.status=='IN_PROGRESS' and datetime.fromisoformat(s.next_prompt['deadline'])<=stamp:
+        deadline=datetime.fromisoformat(s.next_prompt['deadline'])
+        save_turn(db,s,ex,s.next_prompt.get('draft',''),deadline,True);changed=True
+    if changed:db.commit()
+    # If no changes occurred, release the lock before any asynchronous work.
+    else:db.commit()
+    schedule_evaluations(db,s,tasks)
+
+def collect_due_vivas():
+    """Recover expired turns and durable ungraded answers, even with no browser open."""
+    stamp=now()
+    with SessionLocal() as db:
+        ids=list(db.scalars(select(OralSession.id).where(OralSession.status=='IN_PROGRESS',or_(OralSession.expires<=stamp,OralSession.next_prompt['deadline'].as_string()<=stamp.isoformat())).order_by(OralSession.expires).limit(100)))
+        for sid in ids:
+            s=db.get(OralSession,sid)
+            if s:finish_expired(db,s)
+        pending=list(db.scalars(select(OralResponse.id).join(OralSession,OralSession.id==OralResponse.session_id).where(OralResponse.provider=='PENDING REVIEW',OralSession.status!='FINALIZED').order_by(OralResponse.id).limit(20)))
+        active=db.scalar(select(OralSession.id).where(OralSession.status=='IN_PROGRESS').limit(1)) is not None
+    return pending,active
+
+async def viva_deadline_worker():
+    """Bounded recovery loop; stored deadlines survive browser closure and app restarts."""
+    from starlette.concurrency import run_in_threadpool
+    jobs=set()
+    try:
+        while True:
+            try:
+                pending,active=await run_in_threadpool(collect_due_vivas)
+                jobs={job for job in jobs if not job.done()}
+                for rid in pending:
+                    if len(jobs)>=2:break
+                    if rid not in _evaluating:
+                        jobs.add(asyncio.create_task(evaluate_saved_response(rid)))
+                await asyncio.sleep(5 if active or pending else 25)
+            except asyncio.CancelledError:raise
+            except Exception as exc:
+                log.warning('Viva deadline recovery failed: %s',type(exc).__name__)
+                await asyncio.sleep(10)
+    finally:
+        for job in jobs:job.cancel()
+        if jobs:await asyncio.gather(*jobs,return_exceptions=True)
+
+
+def session_payload(db,s,ex,teacher=False,tasks=None):
+    finish_expired(db,s,tasks);records,latest=latest_responses(db,s);questions=[db.get(VivaQuestion,qid) for qid in s.question_ids]
     reviews={r.question_id:r for r in db.scalars(select(OralReview).where(OralReview.session_id==s.id))}
     complete=s.status!='IN_PROGRESS';feedback=teacher
     proposed=[latest[q.id].proposed_marks if q.id in latest else (0 if complete else None) for q in questions]
     total_ai=round(sum(proposed),2) if complete and all(v is not None for v in proposed) else None
     confirmed=round(sum(r.marks for r in reviews.values()),2) if s.status=='FINALIZED' else None
-    result={'id':s.id,'viva_id':ex.id,'title':ex.title,'course_id':ex.course_id,'status':s.status,'index':s.cursor,'turn':s.turn,'total':len(questions),'total_marks':ex.config['total_marks'],'expires':s.expires,'created':s.created,'complete':complete,'follow_up_depth':s.follow_depth,'immediate_feedback':False,'ai_proposed_marks':total_ai if teacher else None,'confirmed_marks':confirmed if teacher else None,'percentage':round(100*confirmed/ex.config['total_marks'],1) if teacher and confirmed is not None else None,'review_required':True}
+    result={'id':s.id,'viva_id':ex.id,'title':ex.title,'course_id':ex.course_id,'status':s.status,'index':s.cursor,'turn':s.turn,'total':len(questions),'total_marks':ex.config['total_marks'],'expires':s.expires,'created':s.created,'complete':complete,'follow_up_depth':0,'immediate_feedback':False,'ai_proposed_marks':total_ai if teacher else None,'confirmed_marks':confirmed if teacher else None,'percentage':round(100*confirmed/ex.config['total_marks'],1) if teacher and confirmed is not None else None,'review_required':True}
     result['responses']=[{'id':r.id,'question_id':r.question_id,'prompt':r.prompt,'transcript':r.transcript,'depth':r.depth,'created':r.created,**({'evaluation':{k:v for k,v in r.evaluation.items() if k not in ('follow_up','follow_up_citations')},'proposed_marks':r.proposed_marks,'provider':r.provider} if feedback else {})} for r in records]
     result['reviews']=[{'question_id':r.question_id,'marks':r.marks,'feedback':r.feedback,'flagged':r.flagged,'finalized':r.finalized} for r in reviews.values()] if teacher else []
     if not complete:
-        q=questions[s.cursor];prompt=s.next_prompt['text'] if s.next_prompt else q.prompt
-        result['question']={'id':q.id,'question_text':prompt,'marks':q.marks,'type':q.content['question_type'],'topic':db.get(Topic,q.topic_id).name if q.topic_id and ex.config['show_topic'] else None,'is_follow_up':s.follow_depth>0,'options':q.content.get('options',[])}
+        q=questions[s.cursor];clock=s.next_prompt or {}
+        deadline=datetime.fromisoformat(clock['deadline'])
+        result.update(question_deadline=deadline,remaining_seconds=max(0,(deadline-now()).total_seconds()),draft=clock.get('draft','') if not teacher else '',draft_revision=clock.get('revision',0) if not teacher else 0)
+        result['question']={'id':q.id,'question_text':q.prompt,'marks':q.marks,'type':q.content['question_type'],'topic':db.get(Topic,q.topic_id).name if q.topic_id and ex.config['show_topic'] else None,'is_follow_up':False,'options':q.content.get('options',[])}
     if teacher:
         u=db.get(User,s.student_id);result.update(student_id=u.id,name=u.name,university_id=u.university_id,questions=[teacher_question(q) for q in questions],rubric=ex.config['rubric'],scope=ex.scope)
+    # Release the read transaction before provider background tasks run.
+    db.commit()
     return result
 
 @router.get('/courses/{cid}/vivas')
@@ -177,36 +311,7 @@ class GenerateMore(Input):
 async def generate_more(eid:int,data:GenerateMore,user=Depends(current_user),db=Depends(get_db)):
     """Extend a draft question bank, retaining teacher approval and source checks."""
     ex=exam_access(db,user,eid,True);mutable(ex)
-    if not ex.config.get('personalize_questions',False):
-        raise HTTPException(409,'Enable personalized questions before expanding the bank.')
-    throttle(db,'formal-generation:'+str(user.id),15)
-    existing=db.scalars(select(VivaQuestion).where(VivaQuestion.viva_id==eid)).all()
-    unit=round(ex.config['total_marks']/ex.config['count'],2)
-    if abs(ex.config['count']*unit-ex.config['total_marks'])>.001:
-        raise HTTPException(409,'Expanded banks need equal per-question marks. Adjust the exam total or count.')
-    if existing and any(abs(q.marks-unit)>.001 for q in existing):
-        raise HTTPException(409,'All bank questions must have the same marks for per-student selection.')
-    context=evidence_for(db,ex)
-    topics=[{'id':t.id,'name':t.name,'clo':t.clo,'source_ids':(t.structure or {}).get('source_ids',[])} for t in db.scalars(select(Topic).where(Topic.course_id==ex.course_id)) if visible_topic(t)]
-    temp={**ex.config,'count':data.count,'total_marks':round(unit*data.count,2)}
-    try:
-        qs,provider=await grounded.questions(context,topics,temp,existing_prompts=[q.prompt for q in existing])
-        seen={q.prompt.strip().casefold() for q in existing}
-        if len(qs)!=data.count:raise ValueError('The requested number of distinct questions was not produced.')
-        for q in qs:
-            validate_topic(db,ex,q)
-            if q.question_type not in ex.config['question_types']:raise ValueError('Question type is outside the configured mix.')
-            if abs(q.marks-unit)>.001:raise ValueError('Question marks do not match the pool allocation.')
-            if q.question_text.strip().casefold() in seen:raise ValueError('A generated question repeats an existing question.')
-            seen.add(q.question_text.strip().casefold())
-        lock_draft(db,ex)
-        for q in qs:store_question(db,ex,q,approved=not ex.config['question_review_required'],sources=validate_citations(q.citations,context),provider=provider)
-    except HTTPException:raise
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(502,str(exc) if isinstance(exc,ValueError) else 'Unable to expand the bank. Add questions manually or retry.')
-    audit(db,user,'viva question pool expanded',eid);db.commit()
-    return exam_payload(db,ex,True)
+    raise HTTPException(409,'Assigned viva uses a fixed approved set. Add or edit only the questions needed for the configured count.')
 
 @router.post('/vivas/{eid}/questions',status_code=201)
 async def add_question(eid:int,data:AddQuestion,user=Depends(current_user),db=Depends(get_db)):
@@ -236,15 +341,9 @@ def question_review(eid:int,qid:int,data:PublishQuestion,user=Depends(current_us
 def publish(eid:int,user=Depends(current_user),db=Depends(get_db)):
     ex=exam_access(db,user,eid,True);mutable(ex);lock_draft(db,ex);qs=db.scalars(select(VivaQuestion).where(VivaQuestion.viva_id==eid,VivaQuestion.approved.is_(True))).all()
     count=ex.config['count']
-    if ex.config.get('personalize_questions',False):
-        if len(qs)<count:raise HTTPException(409,'Approve at least the requested number of questions to publish.')
-        if len(qs)==count:
-            if abs(sum(q.marks for q in qs)-ex.config['total_marks'])>.001:raise HTTPException(409,'Approved marks must total the exam marks.')
-        else:
-            unit=ex.config['total_marks']/count
-            if any(abs(q.marks-unit)>.001 for q in qs):raise HTTPException(409,'An expanded pool needs equal per-question marks so every student receives the same total.')
-    elif len(qs)!=count or abs(sum(q.marks for q in qs)-ex.config['total_marks'])>.001:
+    if len(qs)!=count or abs(sum(q.marks for q in qs)-ex.config['total_marks'])>.001:
         raise HTTPException(409,'Approve exactly the configured question count, with marks adding to the configured total.')
+    ex.config={**ex.config,'personalize_questions':False,'follow_up_depth':0,'minutes':count*2,'review_required':True,'immediate_feedback':False}
     context=evidence_for(db,ex)
     for q in qs:
         try:validate_citations(q.content['citations'],context)
@@ -254,82 +353,75 @@ def publish(eid:int,user=Depends(current_user),db=Depends(get_db)):
     notify_published_viva(db,ex)
     audit(db,user,'viva published',eid);db.commit();return exam_payload(db,ex,True)
 @router.post('/vivas/{eid}/start')
-def start(eid:int,user=Depends(current_user),db=Depends(get_db)):
+def start(eid:int,tasks:BackgroundTasks,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');ex=exam_access(db,user,eid)
+    # Serialize concurrent start requests for the same exam (PostgreSQL).
+    db.scalar(select(VivaExam.id).where(VivaExam.id==eid).with_for_update())
     old=db.scalar(select(OralSession).where(OralSession.viva_id==eid,OralSession.student_id==user.id))
-    if old:return session_payload(db,old,ex)
+    if old:return session_payload(db,old,ex,tasks=tasks)
+    stamp=now()
     for key in ('starts','ends'):
         value=ex.config.get(key)
         if value:
             date=utc_naive(datetime.fromisoformat(value))
-            if (key=='starts' and now()<date) or (key=='ends' and now()>date):raise HTTPException(409,'Viva is outside its availability window.')
+            if (key=='starts' and stamp<date) or (key=='ends' and stamp>=date):raise HTTPException(409,'Viva is outside its availability window.')
     ids=list(db.scalars(select(VivaQuestion.id).where(VivaQuestion.viva_id==eid,VivaQuestion.approved.is_(True)).order_by(VivaQuestion.id)))
-    if len(ids)<ex.config['count']:raise HTTPException(409,'The question bank is too small. Ask your teacher to check this viva.')
-    if ex.config.get('personalize_questions',False):
-        # Select from approved questions, without reusing a complete question set
-        # while unused combinations are still available. Older sessions stay fixed.
-        rng=SystemRandom()
-        prior={tuple(sorted(previous.question_ids)) for previous in db.scalars(select(OralSession).where(OralSession.viva_id==eid))}
-        pool=list(ids)
-        rng.shuffle(pool)
-        selected=pool[:ex.config['count']]
-        if len(pool)>ex.config['count'] and tuple(sorted(selected)) in prior:
-            # Randomly shuffle first, then search a bounded number of alternatives.
-            for candidate in combinations(pool,ex.config['count']):
-                if tuple(sorted(candidate)) not in prior:
-                    selected=list(candidate)
-                    rng.shuffle(selected)
-                    break
-        ids=selected
-    else:
-        ids=ids[:ex.config['count']]
-    expiry=now()+timedelta(minutes=ex.config['minutes'])
+    if len(ids)!=ex.config['count']:raise HTTPException(409,'This older viva has a mismatched approved pool. Ask your teacher to publish a new fixed-count viva.')
+    expiry=stamp+timedelta(seconds=QUESTION_SECONDS*len(ids))
     if ex.config.get('ends'):expiry=min(expiry,utc_naive(datetime.fromisoformat(ex.config['ends'])))
-    s=OralSession(viva_id=eid,student_id=user.id,question_ids=ids,cursor=0,turn=0,follow_depth=0,status='IN_PROGRESS',expires=expiry);db.add(s);db.commit();return session_payload(db,s,ex)
+    s=OralSession(viva_id=eid,student_id=user.id,question_ids=ids,cursor=0,turn=0,follow_depth=0,status='IN_PROGRESS',expires=expiry,next_prompt=clock_state(min(expiry,stamp+timedelta(seconds=QUESTION_SECONDS))))
+    db.add(s);db.commit();return session_payload(db,s,ex,tasks=tasks)
+
 @router.get('/oral-sessions/{sid}')
-def get_session(sid:int,user=Depends(current_user),db=Depends(get_db)):
-    s,ex=session_access(db,user,sid);return session_payload(db,s,ex)
+def get_session(sid:int,tasks:BackgroundTasks,user=Depends(current_user),db=Depends(get_db)):
+    s,ex=session_access(db,user,sid);return session_payload(db,s,ex,tasks=tasks)
+
+@router.put('/oral-sessions/{sid}/draft')
+def save_draft(sid:int,data:OralDraft,tasks:BackgroundTasks,user=Depends(current_user),db=Depends(get_db)):
+    role(user,'student');s,ex=session_access(db,user,sid)
+    if s.status=='IN_PROGRESS' and not (s.next_prompt or {}).get('fixed_viva'):finish_expired(db,s,tasks)
+    s=locked_session(db,sid)
+    if s.status!='IN_PROGRESS' or s.turn!=data.turn or datetime.fromisoformat(s.next_prompt['deadline'])<=now():raise HTTPException(409,'Question time is over or answer already saved.')
+    if data.revision>(s.next_prompt or {}).get('revision',0):
+        updated={**s.next_prompt,'draft':data.transcript,'revision':data.revision}
+        claim=db.execute(update(OralSession).where(OralSession.id==sid,OralSession.turn==data.turn,OralSession.status=='IN_PROGRESS').values(next_prompt=updated))
+        if claim.rowcount!=1:db.rollback();raise HTTPException(409,'Question changed.')
+    db.commit();return {'saved':True}
+
 @router.post('/oral-sessions/{sid}/answer')
-async def answer(sid:int,data:OralAnswer,user=Depends(current_user),db=Depends(get_db)):
-    role(user,'student');s,ex=session_access(db,user,sid);throttle(db,'formal-answer:'+str(user.id),90)
-    if s.status!='IN_PROGRESS' or s.expires<=now():raise HTTPException(409,'Session is complete or expired. Open the saved results.')
-    if s.turn!=data.turn:raise HTTPException(409,'This turn is already saved or is not currently issued.')
-    turn=s.turn;cursor=s.cursor;depth=s.follow_depth;q=db.get(VivaQuestion,s.question_ids[cursor]);prompt=s.next_prompt['text'] if s.next_prompt else q.prompt
-    records,_=latest_responses(db,s);history=[{'question_id':r.question_id,'question':r.prompt,'answer':r.transcript,'feedback':r.evaluation.get('feedback','')} for r in records]
-    sources=list({src['id']:src for question_id in s.question_ids for src in db.get(VivaQuestion,question_id).content['sources']}.values())
-    try:evaluation,provider=await grounded.evaluate({**q.content,'question_text':q.prompt,'current_prompt':prompt,'question_id':q.id,'marks':q.marks},data.transcript,history,ex.config['rubric'],sources)
-    except Exception:evaluation={'correctness':'insufficient_evidence','feedback':'Evaluation is unavailable or failed evidence validation. Your answer is saved for teacher review.','confidence':0,'marks':None,'scoring':[],'correct_points':[],'incorrect_points':[],'missing_points':[],'misconceptions':[],'follow_up':''};provider='PROVIDER FALLBACK'
-    # Never accept output outside the current question's maximum.
-    proposed=evaluation.get('marks')
-    if proposed is not None and not 0<=proposed<=q.marks:raise HTTPException(502,'Evaluation marks failed validation.')
-    follow=evaluation.get('follow_up','') if depth<ex.config['follow_up_depth'] else ''
-    # Repeated prompts are not additional evidence: advance instead of trapping a student.
-    normalize=lambda text:' '.join(text.casefold().split()).rstrip('?.!')
-    prior_prompts={normalize(q.prompt),normalize(prompt)}|{normalize(r.prompt) for r in records if r.question_id==q.id}
-    if follow and normalize(follow) in prior_prompts:
-        follow='';evaluation['follow_up']='';evaluation['follow_up_citations']=[]
-    newcursor=cursor if follow else cursor+1;newdepth=depth+1 if follow else 0
-    complete=newcursor>=len(s.question_ids)
-    claim=db.execute(update(OralSession).where(OralSession.id==sid,OralSession.turn==turn,OralSession.status=='IN_PROGRESS',OralSession.expires>now()).values(turn=turn+1,cursor=newcursor,follow_depth=newdepth,next_prompt={'text':follow,'citations':evaluation.get('follow_up_citations',[])} if follow else None,status='TEACHER_REVIEW_REQUIRED' if complete else 'IN_PROGRESS',submitted=now() if complete else None))
-    if claim.rowcount!=1:db.rollback();raise HTTPException(409,'Session changed or time expired while evaluating. Refresh the saved session.')
-    r=OralResponse(session_id=sid,question_id=q.id,turn=turn,depth=depth,prompt=prompt,transcript=data.transcript,evaluation=evaluation,proposed_marks=proposed,provider=provider);db.add(r);db.commit();db.refresh(s)
-    if complete:notify_formal_review(db,s,ex);db.commit()
-    return session_payload(db,s,ex)
+def answer(sid:int,data:OralAnswer,tasks:BackgroundTasks,user=Depends(current_user),db=Depends(get_db)):
+    role(user,'student');s,ex=session_access(db,user,sid)
+    # Do not run an evaluator before the answer is durably stored.
+    if not (s.next_prompt or {}).get('fixed_viva') and s.status=='IN_PROGRESS':finish_expired(db,s)
+    s=locked_session(db,sid)
+    if s.status!='IN_PROGRESS' or s.turn!=data.turn:raise HTTPException(409,'This turn is already saved or is not currently issued.')
+    stamp=now();deadline=datetime.fromisoformat(s.next_prompt['deadline']);late=stamp>=deadline
+    # At/after the deadline only the last server-acknowledged draft is accepted.
+    text=s.next_prompt.get('draft','') if late else data.transcript
+    save_turn(db,s,ex,text,deadline if late else stamp,late);db.commit()
+    return session_payload(db,s,ex,tasks=tasks)
+
 @router.post('/oral-sessions/{sid}/finish')
-def finish(sid:int,user=Depends(current_user),db=Depends(get_db)):
-    s,ex=session_access(db,user,sid)
-    if s.status=='IN_PROGRESS':s.status='TEACHER_REVIEW_REQUIRED';s.submitted=now();notify_formal_review(db,s,ex);db.commit()
-    return session_payload(db,s,ex)
+def finish(sid:int,tasks:BackgroundTasks,user=Depends(current_user),db=Depends(get_db)):
+    role(user,'student');s,ex=session_access(db,user,sid);finish_expired(db,s)
+    s=locked_session(db,sid)
+    if s.status=='IN_PROGRESS':
+        # Early submission records the current saved draft and remaining blanks.
+        stamp=now();save_turn(db,s,ex,s.next_prompt.get('draft',''),stamp)
+        while s.status=='IN_PROGRESS':save_turn(db,s,ex,'',stamp)
+        db.commit()
+    return session_payload(db,s,ex,tasks=tasks)
+
 @router.get('/courses/{cid}/oral-history')
-def history(cid:int,user=Depends(current_user),db=Depends(get_db)):
+def history(cid:int,tasks:BackgroundTasks,user=Depends(current_user),db=Depends(get_db)):
     role(user,'student');course_access(db,user,cid)
     rows=db.scalars(select(OralSession).join(VivaExam,VivaExam.id==OralSession.viva_id).where(VivaExam.course_id==cid,OralSession.student_id==user.id).order_by(OralSession.id.desc()).limit(100)).all()
-    return [session_payload(db,s,db.get(VivaExam,s.viva_id)) for s in rows]
+    return [session_payload(db,s,db.get(VivaExam,s.viva_id),tasks=tasks) for s in rows]
 @router.get('/courses/{cid}/oral-review')
-def queue(cid:int,q:str='',user=Depends(current_user),db=Depends(get_db)):
+def queue(cid:int,tasks:BackgroundTasks,q:str='',user=Depends(current_user),db=Depends(get_db)):
     course_access(db,user,cid,True)
     rows=db.scalars(select(OralSession).join(VivaExam,VivaExam.id==OralSession.viva_id).join(User,User.id==OralSession.student_id).where(VivaExam.course_id==cid).order_by(OralSession.created.desc()).limit(300)).all()
-    return [session_payload(db,s,db.get(VivaExam,s.viva_id),True) for s in rows if q.lower() in (db.get(User,s.student_id).name+' '+db.get(User,s.student_id).university_id).lower()]
+    return [session_payload(db,s,db.get(VivaExam,s.viva_id),True,tasks=tasks) for s in rows if q.lower() in (db.get(User,s.student_id).name+' '+db.get(User,s.student_id).university_id).lower()]
 @router.put('/oral-sessions/{sid}/questions/{qid}/review')
 def review(sid:int,qid:int,data:ReviewMarks,user=Depends(current_user),db=Depends(get_db)):
     s,ex=session_access(db,user,sid,True);finish_expired(db,s)

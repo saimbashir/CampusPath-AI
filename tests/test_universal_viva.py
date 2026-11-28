@@ -73,23 +73,21 @@ def test_runtime_course_material_viva_audio_review_analytics(clients,monkeypatch
     assert any('has been reviewed' in x['message'] for x in good(s.get('/api/notifications')))
     assert not any('4.5/5' in x['message'] for x in good(s.get('/api/notifications')))
 
-def test_followup_context_and_marks_are_not_double_counted(clients,monkeypatch):
-    t,s,cid,rid,_=course_flow(clients,*MATERIALS[2]);ex=create_exam(t,cid,rid,follow_up_depth=1,immediate_feedback=False)
+def test_followup_requests_never_extend_fixed_assigned_viva(clients,monkeypatch):
+    t,s,cid,rid,_=course_flow(clients,*MATERIALS[2]);ex=create_exam(t,cid,rid,follow_up_depth=3,immediate_feedback=True)
     session=good(s.post(f"/api/vivas/{ex['id']}/start"));calls=[]
     async def evaluator(instruction,context,schema):
         if schema is grounded.EvaluatedAnswer:
             obj=context[0];calls.append(obj);r=await structured_fake(instruction,context,schema)
-            if not obj['conversation']:
-                r.follow_up='Explain the supporting relationship in the cited passage.';r.follow_up_citations=r.citations
+            r.follow_up='Explain the supporting relationship in the cited passage.';r.follow_up_citations=r.citations
             return r
         return await structured_fake(instruction,context,schema)
     monkeypatch.setattr(grounded,'enabled',lambda:True);monkeypatch.setattr(grounded,'structured_generation',evaluator)
     first=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':0,'transcript':'Sequence numbers order bytes.'}))
-    assert first['question']['is_follow_up'] and not first['complete'] and 'evaluation' not in first['responses'][0]
-    second=good(s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':1,'transcript':'The receiver uses sequence numbers to assemble the ordered byte stream.'}))
-    assert second['complete'] and second['ai_proposed_marks'] is None and len(second['responses'])==2
+    assert first['complete'] and first['turn']==1 and len(first['responses'])==1 and 'question' not in first
+    assert first['ai_proposed_marks'] is None and 'evaluation' not in first['responses'][0]
     assert good(t.get(f'/api/courses/{cid}/oral-review'))[0]['ai_proposed_marks']==4
-    assert calls[1]['conversation'][0]['answer']=='Sequence numbers order bytes.'
+    assert len(calls)==1 and calls[0]['conversation']==[]
     assert s.post(f"/api/oral-sessions/{session['id']}/answer",json={'turn':1,'transcript':'replay'}).status_code==409
 
 def test_scope_private_source_and_cross_student_guards(clients):

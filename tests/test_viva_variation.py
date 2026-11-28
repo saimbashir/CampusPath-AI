@@ -32,7 +32,7 @@ def test_student_practice_has_30_distinct_prompts_and_resume_persists(clients):
     assert result['next']['complete'] and len(result['next']['turns'])==30
 
 
-def test_formal_question_pool_selects_per_student_without_exposing_answers(clients):
+def test_formal_question_pool_requires_exact_approved_set(clients):
     teacher,student,cid,rid,_=course_flow(clients,*MATERIALS[1])
     peer,_=clients('ahmed@campuspath.demo')
     # Enroll the second student using teacher-issued enrollment code.
@@ -49,12 +49,14 @@ def test_formal_question_pool_selects_per_student_without_exposing_answers(clien
            'expected_concepts':['The course material'], 'acceptable_answer_points':['Explain correctly'],
            'citations':[{'chunk_id':evidence['id'],'quote':evidence['text']}], 'approved':True}
         created.append(good(teacher.post(f"/api/vivas/{ex['id']}/questions",json=q),201))
+    assert teacher.post(f"/api/vivas/{ex['id']}/publish").status_code==409
+    for q in created[-1]['questions'][2:]:good(teacher.post(f"/api/vivas/{ex['id']}/questions/{q['id']}/review",json={'approved':False}))
     published=good(teacher.post(f"/api/vivas/{ex['id']}/publish"))
-    assert published['count']==2 and len(published['questions'])==7
+    assert published['count']==2 and len([q for q in published['questions'] if q['approved']])==2
     a=good(student.post(f"/api/vivas/{ex['id']}/start"))
     b=good(peer.post(f"/api/vivas/{ex['id']}/start"))
     assert a['total']==2 and b['total']==2
-    assert a==good(student.get(f"/api/oral-sessions/{a['id']}"))
+    refreshed=good(student.get(f"/api/oral-sessions/{a['id']}"));assert a['id']==refreshed['id'] and a['question']==refreshed['question'] and a['question_deadline']==refreshed['question_deadline']
     for row in (a,b):
         assert 'expected_concepts' not in str(row)
         assert row['question']['id'] in [x['id'] for x in published['questions']]
@@ -64,4 +66,4 @@ def test_formal_question_pool_selects_per_student_without_exposing_answers(clien
         x=db.get(OralSession,a['id']); y=db.get(OralSession,b['id'])
         assert len(x.question_ids)==len(y.question_ids)==2
         assert len(set(x.question_ids))==2
-        assert set(x.question_ids)!=set(y.question_ids), "Two students should receive different approved subsets when the pool is large enough."
+        assert x.question_ids==y.question_ids==[q['id'] for q in published['questions'] if q['approved']]
